@@ -17,6 +17,11 @@ from model import db, ContestRequest, User
 def create_contest_request(user_id, reason, edit_count=None):
     """
     Create a new Contest Creator rights request.
+
+    If edit_count >= 300, the request is auto-approved immediately
+    (no superadmin review needed) and the user's role is upgraded.
+    Otherwise, the request is created as 'pending' for manual review,
+    and a reason is required.
     """
     user = User.query.get(user_id)
     if not user:
@@ -28,21 +33,28 @@ def create_contest_request(user_id, reason, edit_count=None):
     if existing_pending:
         raise ValueError("User already has a pending request")
 
-    if not reason or not reason.strip():
-        raise ValueError("Reason is required")
+    is_auto_eligible = edit_count is not None and edit_count >= 300
+
+    if not is_auto_eligible and (not reason or not reason.strip()):
+        raise ValueError("Reason is required for users with fewer than 300 edits")
+
+    if is_auto_eligible:
+        status = "approved"
+        user.role = "trusted_member"
+    else:
+        status = "pending"
 
     new_request = ContestRequest(
         user_id=user_id,
-        reason=reason.strip(),
+        reason=reason.strip() if reason else None,
         edit_count=edit_count,
-        status="pending",
+        status=status,
     )
 
     db.session.add(new_request)
     db.session.commit()
 
     return new_request
-
 
 # ------------------------------------------------------------------
 # APPROVE REQUEST
