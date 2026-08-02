@@ -37,7 +37,7 @@ class ContestRequest(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
 
     # Why they want the rights
-    reason = db.Column(db.Text, nullable=False)
+    reason = db.Column(db.Text, nullable=True)  # required only when edit_count < 300
 
     # Cached Wikimedia edit count at time of request (for 300+ eligibility check)
     edit_count = db.Column(db.Integer, nullable=True)
