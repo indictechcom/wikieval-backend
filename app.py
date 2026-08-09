@@ -12,6 +12,7 @@ import yaml
 from model import db, ContestRequest
 import services
 import logging
+from model import db, ContestRequest, User
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -163,6 +164,38 @@ def reject_contest_request_route(request_id):
         return jsonify({"error": str(e)}), 400
 
     return jsonify(contest_request.to_dict()), 200
+
+# ------------------------------------------------------------------
+# ADMIN — USER MANAGEMENT (read-only)
+# ------------------------------------------------------------------
+
+@app.route('/api/users', methods=['GET'])
+def list_users():
+    _, error = require_admin()
+    if error:
+        return error
+
+    from model import User
+    role_filter = request.args.get('role')
+    query = User.query
+    if role_filter:
+        query = query.filter_by(role=role_filter)
+
+    return jsonify([u.to_dict() for u in query.order_by(User.created_at.desc())]), 200
+
+
+@app.route('/api/users/<int:user_id>', methods=['GET'])
+def get_user(user_id):
+    _, error = require_admin()
+    if error:
+        return error
+
+    from model import User
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    return jsonify(user.to_dict()), 200
 
 
 if __name__ == "__main__":
