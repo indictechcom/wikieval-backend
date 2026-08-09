@@ -14,7 +14,7 @@ class User(db.Model):
 
     user_language = db.Column(db.String(20), default='en')
 
-    # Role-based access control: 'user', 'admin', or 'superadmin'
+    # Role-based access control: 'user', 'trusted_member', 'jury', or 'superadmin'
     role = db.Column(db.String(20), nullable=False, default="user")
 
     created_at = db.Column(
@@ -23,9 +23,20 @@ class User(db.Model):
         nullable=False,
     )
 
+    def to_dict(self):
+        """Serialize this user for API responses."""
+        return {
+            "id": self.id,
+            "username": self.username,
+            "user_language": self.user_language,
+            "role": self.role,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
     def __repr__(self):
         """String representation of User instance"""
         return f"<User {self.username}>"
+
 
 class ContestRequest(db.Model):
     __tablename__ = 'contest_requests'
@@ -58,11 +69,8 @@ class ContestRequest(db.Model):
     requester = db.relationship('User', foreign_keys=[user_id], backref='contest_creator_requests')
     reviewer = db.relationship('User', foreign_keys=[reviewed_by], backref='reviewed_contest_creator_requests')
 
-    def __repr__(self):
-        """String representation of ContestRequest instance"""
-        return f"<ContestRequest user_id={self.user_id} status={self.status}>"
-
     def to_dict(self):
+        """Serialize this contest request for API responses."""
         return {
             "id": self.id,
             "user_id": self.user_id,
@@ -76,3 +84,6 @@ class ContestRequest(db.Model):
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
+    def __repr__(self):
+        """String representation of ContestRequest instance"""
+        return f"<ContestRequest user_id={self.user_id} status={self.status}>"
