@@ -7,7 +7,7 @@ and models so each piece stays testable and focused.
 
 from datetime import datetime, timezone
 
-from model import db, ContestRequest, User
+from model import db, Contest, ContestRequest, User
 
 
 # ------------------------------------------------------------------
@@ -109,3 +109,98 @@ def reject_contest_request(request_id, reviewer_id, rejection_reason=None):
     db.session.commit()
 
     return contest_request
+
+
+# ------------------------------------------------------------------
+# CONTEST CRUD (core fields only)
+# ------------------------------------------------------------------
+
+def _parse_date(value):
+    return datetime.strptime(value, "%Y-%m-%d").date() if value else None
+
+
+def can_create_contests(user):
+    return user.role in ("trusted_member", "admin", "superadmin")
+
+
+def can_manage_contest(user, contest):
+    """True if the user may update/delete this contest (admin or organizer)."""
+    return user.role in ("admin", "superadmin") or user.username in contest.get_organizers()
+
+
+def create_contest(creator, data):
+    name = (data.get("name") or "").strip()
+    project_name = (data.get("project_name") or "").strip()
+    if not name or not project_name:
+        raise ValueError("name and project_name are required")
+
+    if data.get("min_byte_count") is None:
+        raise ValueError("min_byte_count is required")
+
+    start_date = _parse_date(data.get("start_date"))
+    end_date = _parse_date(data.get("end_date"))
+    if start_date and end_date and start_date >= end_date:
+        raise ValueError("end_date must be after start_date")
+
+    contest = Contest(
+        name=name,
+        project_name=project_name,
+        creator=creator,
+        description=data.get("description"),
+        start_date=start_date,
+        end_date=end_date,
+        min_byte_count=int(data["min_byte_count"]),
+        min_reference_count=int(data.get("min_reference_count") or 0),
+        template_link=data.get("template_link"),
+    )
+    contest.set_rules(data.get("rules", {}))
+    contest.set_categories(data.get("categories", []))
+    contest.set_scoring_parameters(data.get("scoring_parameters"))
+    contest.set_jury_members(data.get("jury_members", []))
+    contest.set_organizers(data.get("organizers", []))
+
+    db.session.add(contest)
+    db.session.commit()
+
+    return contest
+
+
+def update_contest(contest, data):
+    for field in ("name", "project_name"):
+        if field in data:
+            setattr(contest, field, (data[field] or "").strip())
+
+    for field in ("description", "template_link"):
+        if field in data:
+            setattr(contest, field, data[field])
+
+    for field in ("min_byte_count", "min_reference_count"):
+        if field in data:
+            setattr(contest, field, int(data[field]))
+
+    if "start_date" in data:
+        contest.start_date = _parse_date(data["start_date"])
+    if "end_date" in data:
+        contest.end_date = _parse_date(data["end_date"])
+    if contest.start_date and contest.end_date and contest.start_date >= contest.end_date:
+        raise ValueError("end_date must be after start_date")
+
+    if "rules" in data:
+        contest.set_rules(data["rules"])
+    if "categories" in data:
+        contest.set_categories(data["categories"])
+    if "scoring_parameters" in data:
+        contest.set_scoring_parameters(data["scoring_parameters"])
+    if "jury_members" in data:
+        contest.set_jury_members(data["jury_members"])
+    if "organizers" in data:
+        contest.set_organizers(data["organizers"])
+
+    db.session.commit()
+
+    return contest
+
+
+def delete_contest(contest):
+    db.session.delete(contest)
+    db.session.commit()

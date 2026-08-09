@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from flask_sqlalchemy import SQLAlchemy
 
 db = SQLAlchemy()
@@ -184,6 +184,31 @@ class Contest(db.Model, ContestMixin):
         """String representation of Contest instance"""
         return f"<Contest {self.id}: {self.name}>"
 
+    def is_active(self):
+        if not self.start_date or not self.end_date:
+            return False
+        today = date.today()
+        return self.start_date <= today <= self.end_date
+
+    def is_upcoming(self):
+        if not self.start_date:
+            return False
+        return self.start_date > date.today()
+
+    def is_past(self):
+        if not self.end_date:
+            return False
+        return self.end_date < date.today()
+
+    def get_status(self):
+        if self.is_active():
+            return "current"
+        if self.is_upcoming():
+            return "upcoming"
+        if self.is_past():
+            return "past"
+        return "unknown"
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -202,5 +227,6 @@ class Contest(db.Model, ContestMixin):
             "scoring_parameters": self.get_scoring_parameters(),
             "jury_members": self.get_jury_members(),
             "organizers": self.get_organizers(),
+            "status": self.get_status(),
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
