@@ -11,6 +11,27 @@ from model import db, ContestRequest, User
 
 
 # ------------------------------------------------------------------
+# USER LOOKUP
+# ------------------------------------------------------------------
+
+def get_or_create_user(username):
+    """
+    Look up a User by MediaWiki username, creating one on first login.
+    Session auth only tells us who's logged in (via MWOAuth); there's
+    no separate registration step, so the user row is created lazily.
+    """
+    user = User.query.filter_by(username=username).first()
+    if user:
+        return user
+
+    user = User(username=username)
+    db.session.add(user)
+    db.session.commit()
+
+    return user
+
+
+# ------------------------------------------------------------------
 # CREATE REQUEST
 # ------------------------------------------------------------------
 

@@ -61,4 +61,18 @@ class ContestRequest(db.Model):
     def __repr__(self):
         """String representation of ContestRequest instance"""
         return f"<ContestRequest user_id={self.user_id} status={self.status}>"
-                
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "username": self.requester.username if self.requester else None,
+            "reason": self.reason,
+            "edit_count": self.edit_count,
+            "status": self.status,
+            "reviewed_by": self.reviewed_by,
+            "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
+            "rejection_reason": self.rejection_reason,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
