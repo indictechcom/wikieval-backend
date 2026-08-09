@@ -95,7 +95,7 @@ def require_admin():
     user = current_user()
     if user is None:
         return None, (jsonify({"error": "Login required"}), 401)
-    if user.role not in ('admin', 'superadmin'):
+    if user.role not in ('superadmin'):
         return None, (jsonify({"error": "Admin access required"}), 403)
     return user, None
 
