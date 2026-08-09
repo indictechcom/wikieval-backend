@@ -87,3 +87,65 @@ class ContestRequest(db.Model):
     def __repr__(self):
         """String representation of ContestRequest instance"""
         return f"<ContestRequest user_id={self.user_id} status={self.status}>"
+
+
+class Contest(db.Model):
+    __tablename__ = 'contests'
+
+    # Primary key
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+
+    # Core identity
+    name = db.Column(db.String(200), nullable=False)
+    project_name = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+
+    # Creator (references the user row, not the username -
+    # consistent with how ContestRequest.user_id already works)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+
+    # Schedule
+    start_date = db.Column(db.Date, nullable=True)
+    end_date = db.Column(db.Date, nullable=True)
+
+    # Article eligibility requirements
+    min_byte_count = db.Column(db.Integer, nullable=False, default=0)
+    min_reference_count = db.Column(db.Integer, nullable=False, default=0)
+
+    # 'new', 'expansion', or 'both'
+    allowed_submission_type = db.Column(db.String(20), nullable=False, default='both')
+
+    # Simple fixed-points scoring (always available)
+    marks_setting_accepted = db.Column(db.Integer, nullable=False, default=0)
+    marks_setting_rejected = db.Column(db.Integer, nullable=False, default=0)
+
+    # Optional multi-parameter scoring config, e.g.
+    # {"enabled": true, "parameters": [{"name": "Quality", "weight": 40}, ...]}
+    # Uses the DB's native JSON type instead of hand-rolled json.dumps/loads
+    # helpers - SQLAlchemy handles the (de)serialization for us.
+    scoring_parameters = db.Column(db.JSON, nullable=True)
+
+    # Optional list of MediaWiki category URLs an article must belong to
+    categories = db.Column(db.JSON, nullable=True)
+
+    # Optional list of user ids who may organize/jury this contest.
+    # Stored as JSON for now (not a join table) to keep this first PR small;
+    # can be normalized into proper association tables in a follow-up once
+    # routes/permissions for organizers & jury are actually being built.
+    organizer_ids = db.Column(db.JSON, nullable=True)
+    jury_ids = db.Column(db.JSON, nullable=True)
+
+    template_link = db.Column(db.Text, nullable=True)
+    outreach_dashboard_url = db.Column(db.Text, nullable=True)
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    creator = db.relationship('User', foreign_keys=[created_by], backref='contests_created')
+
+    def __repr__(self):
+        """String representation of Contest instance"""
+        return f"<Contest {self.name}>"
