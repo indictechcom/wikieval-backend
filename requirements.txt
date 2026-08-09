@@ -11,3 +11,4 @@ flask-cors
 gunicorn
 cryptography
 mwparserfromhell
+pytest
