@@ -145,6 +145,30 @@ class Contest(db.Model):
     )
 
     creator = db.relationship('User', foreign_keys=[created_by], backref='contests_created')
+    def to_dict(self):
+        """Serialize this contest for API responses."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "project_name": self.project_name,
+            "description": self.description,
+            "created_by": self.created_by,
+            "creator_username": self.creator.username if self.creator else None,
+            "start_date": self.start_date.isoformat() if self.start_date else None,
+            "end_date": self.end_date.isoformat() if self.end_date else None,
+            "min_byte_count": self.min_byte_count,
+            "min_reference_count": self.min_reference_count,
+            "allowed_submission_type": self.allowed_submission_type,
+            "marks_setting_accepted": self.marks_setting_accepted,
+            "marks_setting_rejected": self.marks_setting_rejected,
+            "scoring_parameters": self.scoring_parameters,
+            "categories": self.categories,
+            "organizer_ids": self.organizer_ids,
+            "jury_ids": self.jury_ids,
+            "template_link": self.template_link,
+            "outreach_dashboard_url": self.outreach_dashboard_url,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
 
     def __repr__(self):
         """String representation of Contest instance"""
