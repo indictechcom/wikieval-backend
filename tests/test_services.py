@@ -20,9 +20,7 @@ def make_user(db, username, role="user"):
     return user
 
 
-# ------------------------------------------------------------------
 # CREATE — auto-approve path
-# ------------------------------------------------------------------
 
 def test_create_auto_approves_at_300_plus_edits(db):
     user = make_user(db, "AutoUser")
@@ -43,9 +41,7 @@ def test_create_auto_approves_above_300_edits(db):
     assert user.role == "trusted_member"
 
 
-# ------------------------------------------------------------------
 # CREATE — manual review path
-# ------------------------------------------------------------------
 
 def test_create_requires_reason_below_300_edits(db):
     user = make_user(db, "ManualUser")
@@ -64,9 +60,7 @@ def test_create_pending_below_300_edits_with_reason(db):
     assert user.role == "user"  # unchanged
 
 
-# ------------------------------------------------------------------
 # CREATE — validation
-# ------------------------------------------------------------------
 
 def test_create_raises_for_missing_user(db):
     with pytest.raises(ValueError, match="User not found"):
@@ -81,9 +75,7 @@ def test_create_blocks_duplicate_pending_request(db):
         create_contest_request(user.id, reason="second request", edit_count=50)
 
 
-# ------------------------------------------------------------------
 # APPROVE
-# ------------------------------------------------------------------
 
 def test_approve_sets_status_and_role(db):
     user = make_user(db, "ToApprove")
@@ -112,9 +104,7 @@ def test_approve_raises_if_not_pending(db):
         approve_contest_request(req.id, admin.id)
 
 
-# ------------------------------------------------------------------
 # REJECT
-# ------------------------------------------------------------------
 
 def test_reject_sets_status_and_reason(db):
     user = make_user(db, "ToReject")

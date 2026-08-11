@@ -10,9 +10,7 @@ from datetime import datetime, timezone
 from model import db, ContestRequest, User
 
 
-# ------------------------------------------------------------------
 # USER LOOKUP
-# ------------------------------------------------------------------
 
 def get_or_create_user(username):
     """
@@ -31,9 +29,7 @@ def get_or_create_user(username):
     return user
 
 
-# ------------------------------------------------------------------
 # CREATE REQUEST
-# ------------------------------------------------------------------
 
 def create_contest_request(user_id, reason, edit_count=None):
     """
@@ -77,9 +73,7 @@ def create_contest_request(user_id, reason, edit_count=None):
 
     return new_request
 
-# ------------------------------------------------------------------
 # APPROVE REQUEST
-# ------------------------------------------------------------------
 
 def approve_contest_request(request_id, reviewer_id):
     """
@@ -107,9 +101,7 @@ def approve_contest_request(request_id, reviewer_id):
     return contest_request
 
 
-# ------------------------------------------------------------------
 # REJECT REQUEST
-# ------------------------------------------------------------------
 
 def reject_contest_request(request_id, reviewer_id, rejection_reason=None):
     """

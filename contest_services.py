@@ -9,9 +9,9 @@ from datetime import date, datetime, timezone
 from model import db, Contest, User
 
 
-# ------------------------------------------------------------------
+
 # CREATE
-# ------------------------------------------------------------------
+
 
 def create_contest(user_id, name, project_name, **kwargs):
     """
@@ -61,9 +61,7 @@ def create_contest(user_id, name, project_name, **kwargs):
     return contest
 
 
-# ------------------------------------------------------------------
 # READ
-# ------------------------------------------------------------------
 
 def get_contest(contest_id):
     contest = db.session.get(Contest, contest_id)
@@ -94,9 +92,7 @@ def list_contests():
     return {"current": current, "upcoming": upcoming, "past": past}
 
 
-# ------------------------------------------------------------------
 # UPDATE
-# ------------------------------------------------------------------
 
 def update_contest(contest_id, user_id, **kwargs):
     """
@@ -134,9 +130,7 @@ def update_contest(contest_id, user_id, **kwargs):
     return contest
 
 
-# ------------------------------------------------------------------
 # DELETE
-# ------------------------------------------------------------------
 
 def delete_contest(contest_id, user_id):
     contest = db.session.get(Contest, contest_id)
