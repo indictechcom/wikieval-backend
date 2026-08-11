@@ -13,6 +13,7 @@ from model import db, ContestRequest
 import services
 import logging
 from model import db, ContestRequest, User
+import contest_services
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -100,10 +101,7 @@ def require_admin():
         return None, (jsonify({"error": "Admin access required"}), 403)
     return user, None
 
-
-# ------------------------------------------------------------------
 # CONTEST CREATOR REQUEST WORKFLOW
-# ------------------------------------------------------------------
 
 @app.route('/api/contest-requests', methods=['POST'])
 def submit_contest_request():
@@ -165,9 +163,8 @@ def reject_contest_request_route(request_id):
 
     return jsonify(contest_request.to_dict()), 200
 
-# ------------------------------------------------------------------
 # ADMIN — USER MANAGEMENT (read-only)
-# ------------------------------------------------------------------
+
 
 @app.route('/api/users', methods=['GET'])
 def list_users():
@@ -196,6 +193,99 @@ def get_user(user_id):
         return jsonify({"error": "User not found"}), 404
 
     return jsonify(user.to_dict()), 200
+
+
+
+# CONTEST MANAGEMENT
+
+
+@app.route('/api/contests', methods=['POST'])
+def create_contest_route():
+    user = current_user()
+    if user is None:
+        return jsonify({"error": "Login required"}), 401
+
+    data = request.get_json(silent=True) or {}
+    name = data.get('name')
+    project_name = data.get('project_name')
+
+    if not name or not project_name:
+        return jsonify({"error": "name and project_name are required"}), 400
+
+    try:
+        contest = contest_services.create_contest(
+            user.id,
+            name,
+            project_name,
+            description=data.get('description'),
+            start_date=data.get('start_date'),
+            end_date=data.get('end_date'),
+            min_byte_count=data.get('min_byte_count', 0),
+            min_reference_count=data.get('min_reference_count', 0),
+            allowed_submission_type=data.get('allowed_submission_type', 'both'),
+            marks_setting_accepted=data.get('marks_setting_accepted', 0),
+            marks_setting_rejected=data.get('marks_setting_rejected', 0),
+            scoring_parameters=data.get('scoring_parameters'),
+            categories=data.get('categories'),
+            organizer_ids=data.get('organizer_ids'),
+            jury_ids=data.get('jury_ids'),
+            template_link=data.get('template_link'),
+            outreach_dashboard_url=data.get('outreach_dashboard_url'),
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify(contest.to_dict()), 201
+
+
+@app.route('/api/contests', methods=['GET'])
+def list_contests_route():
+    result = contest_services.list_contests()
+    return jsonify({
+        "current": [c.to_dict() for c in result["current"]],
+        "upcoming": [c.to_dict() for c in result["upcoming"]],
+        "past": [c.to_dict() for c in result["past"]],
+    }), 200
+
+
+@app.route('/api/contests/<int:contest_id>', methods=['GET'])
+def get_contest_route(contest_id):
+    try:
+        contest = contest_services.get_contest(contest_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+
+    return jsonify(contest.to_dict()), 200
+
+
+@app.route('/api/contests/<int:contest_id>', methods=['PUT'])
+def update_contest_route(contest_id):
+    user = current_user()
+    if user is None:
+        return jsonify({"error": "Login required"}), 401
+
+    data = request.get_json(silent=True) or {}
+
+    try:
+        contest = contest_services.update_contest(contest_id, user.id, **data)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify(contest.to_dict()), 200
+
+
+@app.route('/api/contests/<int:contest_id>', methods=['DELETE'])
+def delete_contest_route(contest_id):
+    user = current_user()
+    if user is None:
+        return jsonify({"error": "Login required"}), 401
+
+    try:
+        contest_services.delete_contest(contest_id, user.id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify({"message": "Contest deleted successfully"}), 200
 
 
 if __name__ == "__main__":
