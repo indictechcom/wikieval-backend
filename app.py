@@ -191,7 +191,7 @@ def get_user(user_id):
         return error
 
     from model import User
-    user = User.query.get(user_id)
+    user = db.session.get(User, user_id)
     if not user:
         return jsonify({"error": "User not found"}), 404
 

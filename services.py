@@ -44,7 +44,7 @@ def create_contest_request(user_id, reason, edit_count=None):
     Otherwise, the request is created as 'pending' for manual review,
     and a reason is required.
     """
-    user = User.query.get(user_id)
+    user = db.session.get(User, user_id)
     if not user:
         raise ValueError("User not found")
 
@@ -85,14 +85,14 @@ def approve_contest_request(request_id, reviewer_id):
     """
     Approve a pending Contest Creator rights request.
     """
-    contest_request = ContestRequest.query.get(request_id)
+    contest_request = db.session.get(ContestRequest, request_id)
     if not contest_request:
         raise ValueError("Request not found")
 
     if contest_request.status != "pending":
         raise ValueError(f"Request has already been {contest_request.status}")
 
-    requester = User.query.get(contest_request.user_id)
+    requester = db.session.get(User, contest_request.user_id)
     if not requester:
         raise ValueError("Requesting user not found")
 
@@ -115,7 +115,7 @@ def reject_contest_request(request_id, reviewer_id, rejection_reason=None):
     """
     Reject a pending Contest Creator rights request.
     """
-    contest_request = ContestRequest.query.get(request_id)
+    contest_request = db.session.get(ContestRequest, request_id)
     if not contest_request:
         raise ValueError("Request not found")
 
