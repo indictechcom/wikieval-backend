@@ -149,3 +149,132 @@ class Contest(db.Model):
     def __repr__(self):
         """String representation of Contest instance"""
         return f"<Contest {self.name}>"
+
+class Submission(db.Model):
+    __tablename__ = 'submissions'
+
+    # Primary key
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+
+    # Which contest this submission belongs to
+    contest_id = db.Column(
+        db.Integer,
+        db.ForeignKey('contests.id'),
+        nullable=False,
+        index=True
+    )
+
+    # Which user submitted the article
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey('users.id'),
+        nullable=False,
+        index=True
+    )
+
+    # Submitted MediaWiki article URL
+    article_url = db.Column(db.Text, nullable=False)
+
+    # Article title extracted/verified from the URL
+    article_title = db.Column(db.String(255), nullable=True)
+
+    # Submission lifecycle status
+    # pending_validation / pending_review / reviewed / rejected
+    status = db.Column(
+        db.String(30),
+        nullable=False,
+        default='pending_validation',
+        index=True
+    )
+
+    # Pre-validation results
+    validation_passed = db.Column(db.Boolean, nullable=False, default=False)
+    validation_errors = db.Column(db.JSON, nullable=True)
+
+    # Snapshot of article metrics at submission/validation time
+    byte_count = db.Column(db.Integer, nullable=True)
+    reference_count = db.Column(db.Integer, nullable=True)
+
+    # Jury review
+    reviewed_by = db.Column(
+        db.Integer,
+        db.ForeignKey('users.id'),
+        nullable=True,
+        index=True
+    )
+    reviewed_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=True
+    )
+
+    # Score awarded after review
+    score = db.Column(db.Float, nullable=True)
+
+    # Optional jury feedback/comments
+    review_comment = db.Column(db.Text, nullable=True)
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    # Relationships
+    contest = db.relationship(
+        'Contest',
+        foreign_keys=[contest_id],
+        backref='submissions'
+    )
+
+    participant = db.relationship(
+        'User',
+        foreign_keys=[user_id],
+        backref='submissions'
+    )
+
+    reviewer = db.relationship(
+        'User',
+        foreign_keys=[reviewed_by],
+        backref='reviewed_submissions'
+    )
+
+    def to_dict(self):
+        """Serialize submission for API responses."""
+        return {
+            "id": self.id,
+            "contest_id": self.contest_id,
+            "user_id": self.user_id,
+            "username": self.participant.username if self.participant else None,
+            "article_url": self.article_url,
+            "article_title": self.article_title,
+            "status": self.status,
+            "validation_passed": self.validation_passed,
+            "validation_errors": self.validation_errors,
+            "byte_count": self.byte_count,
+            "reference_count": self.reference_count,
+            "reviewed_by": self.reviewed_by,
+            "reviewed_at": (
+                self.reviewed_at.isoformat()
+                if self.reviewed_at else None
+            ),
+            "score": self.score,
+            "review_comment": self.review_comment,
+            "created_at": (
+                self.created_at.isoformat()
+                if self.created_at else None
+            ),
+            "updated_at": (
+                self.updated_at.isoformat()
+                if self.updated_at else None
+            ),
+        }
+
+    def __repr__(self):
+        return f"<Submission id={self.id} contest_id={self.contest_id} user_id={self.user_id}>"    
