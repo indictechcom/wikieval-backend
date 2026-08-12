@@ -14,6 +14,8 @@ import services
 import logging
 from model import db, ContestRequest, User
 import contest_services
+import submission_services
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -209,6 +211,19 @@ def create_contest_route():
     name = data.get('name')
     project_name = data.get('project_name')
 
+    def parse_date(value):
+        if not value:
+            return None
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return "INVALID"
+
+    start_date = parse_date(data.get('start_date'))
+    end_date = parse_date(data.get('end_date'))
+    if start_date == "INVALID" or end_date == "INVALID":
+        return jsonify({"error": "Dates must be in YYYY-MM-DD format"}), 400
+
     if not name or not project_name:
         return jsonify({"error": "name and project_name are required"}), 400
 
@@ -218,8 +233,8 @@ def create_contest_route():
             name,
             project_name,
             description=data.get('description'),
-            start_date=data.get('start_date'),
-            end_date=data.get('end_date'),
+            start_date=start_date,
+            end_date=end_date,
             min_byte_count=data.get('min_byte_count', 0),
             min_reference_count=data.get('min_reference_count', 0),
             allowed_submission_type=data.get('allowed_submission_type', 'both'),
@@ -266,6 +281,26 @@ def update_contest_route(contest_id):
 
     data = request.get_json(silent=True) or {}
 
+    def parse_date(value):
+        if not value:
+            return None
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return "INVALID"
+
+    if 'start_date' in data:
+        parsed = parse_date(data['start_date'])
+        if parsed == "INVALID":
+            return jsonify({"error": "start_date must be in YYYY-MM-DD format"}), 400
+        data['start_date'] = parsed
+
+    if 'end_date' in data:
+        parsed = parse_date(data['end_date'])
+        if parsed == "INVALID":
+            return jsonify({"error": "end_date must be in YYYY-MM-DD format"}), 400
+        data['end_date'] = parsed
+
     try:
         contest = contest_services.update_contest(contest_id, user.id, **data)
     except ValueError as e:
@@ -286,6 +321,67 @@ def delete_contest_route(contest_id):
         return jsonify({"error": str(e)}), 400
 
     return jsonify({"message": "Contest deleted successfully"}), 200
+
+
+# SUBMISSION MANAGEMENT
+
+
+@app.route('/api/contests/<int:contest_id>/submissions', methods=['POST'])
+def create_submission_route(contest_id):
+    user = current_user()
+    if user is None:
+        return jsonify({"error": "Login required"}), 401
+
+    data = request.get_json(silent=True) or {}
+    article_url = data.get('article_url')
+
+    try:
+        submission = submission_services.create_submission(user.id, contest_id, article_url)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify(submission.to_dict()), 201
+
+
+@app.route('/api/contests/<int:contest_id>/submissions', methods=['GET'])
+def list_submissions_route(contest_id):
+    try:
+        submissions = submission_services.list_submissions_for_contest(contest_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+
+    return jsonify([s.to_dict() for s in submissions]), 200
+
+
+@app.route('/api/submissions/<int:submission_id>', methods=['GET'])
+def get_submission_route(submission_id):
+    try:
+        submission = submission_services.get_submission(submission_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+
+    return jsonify(submission.to_dict()), 200
+
+
+@app.route('/api/submissions/<int:submission_id>/review', methods=['POST'])
+def review_submission_route(submission_id):
+    user = current_user()
+    if user is None:
+        return jsonify({"error": "Login required"}), 401
+
+    if user.role not in ('jury', 'superadmin'):
+        return jsonify({"error": "Only jury members or superadmins can review submissions"}), 403
+
+    data = request.get_json(silent=True) or {}
+    score = data.get('score')
+    review_comment = data.get('review_comment')
+
+    try:
+        submission = submission_services.review_submission(submission_id, user.id, score, review_comment)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify(submission.to_dict()), 200
 
 
 if __name__ == "__main__":
