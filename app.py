@@ -16,6 +16,7 @@ from model import db, ContestRequest, User
 import contest_services
 import submission_services
 from datetime import datetime
+import leaderboard_services
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -382,6 +383,16 @@ def review_submission_route(submission_id):
         return jsonify({"error": str(e)}), 400
 
     return jsonify(submission.to_dict()), 200
+
+# LEADERBOARD
+@app.route('/api/contests/<int:contest_id>/leaderboard', methods=['GET'])
+def get_leaderboard_route(contest_id):
+    try:
+        result = leaderboard_services.get_leaderboard(contest_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+
+    return jsonify(result), 200
 
 
 if __name__ == "__main__":
