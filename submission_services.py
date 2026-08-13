@@ -129,17 +129,58 @@ def list_submissions_for_contest(contest_id):
 
 # REVIEW — jury scores a submission
 
-def review_submission(submission_id, reviewer_id, status, score=None, review_comment=None):
+def _calculate_multi_parameter_score(scoring_config, parameter_scores, max_score):
     """
-    Record a jury review for a submission (Simple Scoring mode).
+    Calculate a weighted score from individual parameter scores.
 
-    Only submissions that passed pre-validation (status='pending_review')
-    can be reviewed.
+    scoring_config: {"enabled": true, "parameters": [{"name": "Quality", "weight": 40}, ...]}
+    parameter_scores: {"Quality": 8, "Sources": 7, ...}  (each 0-10)
+    max_score: the contest's marks_setting_accepted, used to scale the final result
 
-    - status='accepted': reviewer must provide a score between 0 and
-      contest.marks_setting_accepted (inclusive).
-    - status='rejected': score is always contest.marks_setting_rejected
-      (any score passed in is ignored).
+    Returns: (final_score: float, error: str or None)
+    """
+    parameters = scoring_config.get("parameters", [])
+    if not parameters:
+        return None, "Contest has no scoring parameters configured"
+
+    required_names = [p["name"] for p in parameters]
+
+    for name in required_names:
+        if name not in parameter_scores:
+            return None, f"Missing score for parameter: {name}"
+        value = parameter_scores[name]
+        if not isinstance(value, (int, float)):
+            return None, f"Score for {name} must be a number"
+        if value < 0 or value > 10:
+            return None, f"Score for {name} must be between 0 and 10"
+
+    total_weight = sum(p.get("weight", 0) for p in parameters)
+    if total_weight == 0:
+        return None, "Contest scoring parameters have no valid weights"
+
+    weighted_sum = 0.0
+    for p in parameters:
+        name = p["name"]
+        weight = p.get("weight", 0)
+        weighted_sum += parameter_scores[name] * (weight / total_weight)
+
+    # weighted_sum is on a 0-10 scale; scale it to the contest's max_score
+    final_score = round(weighted_sum * (max_score / 10), 2)
+    return final_score, None
+
+
+def review_submission(submission_id, reviewer_id, status, score=None, parameter_scores=None, review_comment=None):
+    """
+    Record a jury review for a submission.
+
+    Supports two scoring modes, based on the contest's configuration:
+    - Simple scoring (default): reviewer provides a single score (0 to
+      contest.marks_setting_accepted) when accepting.
+    - Multi-parameter scoring (when contest.scoring_parameters.enabled is
+      True): reviewer provides parameter_scores, and the final score is
+      calculated as a weighted average, scaled to marks_setting_accepted.
+
+    In both modes, status='rejected' always uses contest.marks_setting_rejected.
     """
     submission = db.session.get(Submission, submission_id)
     if not submission:
@@ -159,17 +200,31 @@ def review_submission(submission_id, reviewer_id, status, score=None, review_com
     if not contest:
         raise ValueError("Associated contest not found")
 
-    if status == "accepted":
-        if score is None:
-            raise ValueError("Score is required when accepting a submission")
-        try:
-            score = float(score)
-        except (TypeError, ValueError):
-            raise ValueError("Score must be a number")
+    scoring_config = contest.scoring_parameters or {}
+    is_multi_parameter = scoring_config.get("enabled") is True
 
-        max_score = contest.marks_setting_accepted
-        if score < 0 or score > max_score:
-            raise ValueError(f"Score must be between 0 and {max_score}")
+    if status == "accepted":
+        if is_multi_parameter:
+            if not parameter_scores or not isinstance(parameter_scores, dict):
+                raise ValueError("parameter_scores is required for this contest's scoring mode")
+
+            final_score, error = _calculate_multi_parameter_score(
+                scoring_config, parameter_scores, contest.marks_setting_accepted
+            )
+            if error:
+                raise ValueError(error)
+            score = final_score
+        else:
+            if score is None:
+                raise ValueError("Score is required when accepting a submission")
+            try:
+                score = float(score)
+            except (TypeError, ValueError):
+                raise ValueError("Score must be a number")
+
+            max_score = contest.marks_setting_accepted
+            if score < 0 or score > max_score:
+                raise ValueError(f"Score must be between 0 and {max_score}")
     else:
         # Rejected submissions always get the contest's configured rejection score
         score = float(contest.marks_setting_rejected)
