@@ -374,11 +374,12 @@ def review_submission_route(submission_id):
         return jsonify({"error": "Only jury members or superadmins can review submissions"}), 403
 
     data = request.get_json(silent=True) or {}
+    status = data.get('status')
     score = data.get('score')
     review_comment = data.get('review_comment')
 
     try:
-        submission = submission_services.review_submission(submission_id, user.id, score, review_comment)
+        submission = submission_services.review_submission(submission_id, user.id, status, score, review_comment)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 

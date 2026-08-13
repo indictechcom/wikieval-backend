@@ -129,11 +129,17 @@ def list_submissions_for_contest(contest_id):
 
 # REVIEW — jury scores a submission
 
-
-def review_submission(submission_id, reviewer_id, score, review_comment=None):
+def review_submission(submission_id, reviewer_id, status, score=None, review_comment=None):
     """
-    Record a jury review for a submission. Only submissions that passed
-    pre-validation (status='pending_review') can be reviewed.
+    Record a jury review for a submission (Simple Scoring mode).
+
+    Only submissions that passed pre-validation (status='pending_review')
+    can be reviewed.
+
+    - status='accepted': reviewer must provide a score between 0 and
+      contest.marks_setting_accepted (inclusive).
+    - status='rejected': score is always contest.marks_setting_rejected
+      (any score passed in is ignored).
     """
     submission = db.session.get(Submission, submission_id)
     if not submission:
@@ -146,16 +152,29 @@ def review_submission(submission_id, reviewer_id, score, review_comment=None):
     if submission.status != "pending_review":
         raise ValueError(f"Submission is not awaiting review (current status: {submission.status})")
 
-    if score is None:
-        raise ValueError("Score is required")
-    try:
-        score = float(score)
-    except (TypeError, ValueError):
-        raise ValueError("Score must be a number")
-    if score < 0:
-        raise ValueError("Score cannot be negative")
+    if status not in ("accepted", "rejected"):
+        raise ValueError("Status must be 'accepted' or 'rejected'")
 
-    submission.status = "reviewed"
+    contest = db.session.get(Contest, submission.contest_id)
+    if not contest:
+        raise ValueError("Associated contest not found")
+
+    if status == "accepted":
+        if score is None:
+            raise ValueError("Score is required when accepting a submission")
+        try:
+            score = float(score)
+        except (TypeError, ValueError):
+            raise ValueError("Score must be a number")
+
+        max_score = contest.marks_setting_accepted
+        if score < 0 or score > max_score:
+            raise ValueError(f"Score must be between 0 and {max_score}")
+    else:
+        # Rejected submissions always get the contest's configured rejection score
+        score = float(contest.marks_setting_rejected)
+
+    submission.status = status
     submission.score = score
     submission.review_comment = review_comment
     submission.reviewed_by = reviewer_id
