@@ -117,7 +117,7 @@ class Contest(db.Model):
     end_date = db.Column(db.Date, nullable=True)
 
     # Contest rules, as a JSON blob. Well-known keys (read via rule()):
-    #   min_byte_count (int), min_reference_count (int),
+    #   min_byte_count (int), min_reference_count (int), min_word_count (int),
     #   allowed_submission_type ('new' | 'expansion' | 'both').
     rules = db.Column(db.JSON, nullable=True)
     marks_setting_accepted = db.Column(db.Integer, nullable=False, default=0)
@@ -127,7 +127,7 @@ class Contest(db.Model):
 
     jury_members = db.Column(db.JSON, nullable=True)
     organizers = db.Column(db.JSON, nullable=True)
-    outreach_dashboard_url = db.Column(db.Text, nullable=True)
+    project_link = db.Column(db.Text, nullable=True)
 
     # Metadata
     created_at = db.Column(
@@ -172,7 +172,7 @@ class Contest(db.Model):
             "automated_settings": self.automated_settings,
             "jury_members": self.jury_members,
             "organizers": self.organizers,
-            "outreach_dashboard_url": self.outreach_dashboard_url,
+            "project_link": self.project_link,
             "submission_count": db.session.query(db.func.count(Submission.id))
                                           .filter(Submission.contest_id == self.id)
                                           .scalar(),

@@ -232,24 +232,28 @@ and a computed `submission_count`. Notable fields: `organizers` and
 `jury_members` (arrays of usernames; the creator is always an organizer),
 `marks_setting_accepted` (> 0) and `marks_setting_rejected` (≤ 0), the `rules`
 object, `scoring_parameters` (optional multi-parameter scoring config),
-`automated_settings`, `description`, and `outreach_dashboard_url`.
+`automated_settings`, `description`, and `project_link`.
 
 **Scoring** — a contest is scored either by simple accept/reject marks
 (`marks_setting_accepted` / `marks_setting_rejected`) or, when
-`scoring_parameters.enabled` is true, by weighted parameters:
+`scoring_parameters.enabled` is true, by **points-per-parameter**. Each
+parameter is allocated a maximum number of `points`; `max_score` is the sum of
+those allocations. A jury awards each submission `0..points` per parameter, and
+the final `score` is the sum of the awarded points:
 ```json
 {
   "enabled": true,
-  "max_score": 100,
-  "min_score": 0,
+  "max_score": 7,
   "parameters": [
-    { "name": "Quality", "weight": 40, "description": "..." },
-    { "name": "Sources", "weight": 30, "description": "..." }
+    { "name": "Quality", "points": 5, "description": "..." },
+    { "name": "Sources", "points": 2, "description": "..." }
   ]
 }
 ```
-The weighted final score is computed by the client and sent as `score` on
-review (with the per-parameter breakdown in `parameter_scores`).
+The final score is computed by the client and sent as `score` on review (with
+the per-parameter breakdown in `parameter_scores`, e.g. `{ "Quality": 4,
+"Sources": 2 }`). For a points-based contest `marks_setting_accepted` equals
+`max_score` and `marks_setting_rejected` is `0`.
 
 ## GET `/api/contests`
 
@@ -303,8 +307,8 @@ Create a contest. Requires login **and** `can_create_contest`.
 other contest fields are optional. Dates are ISO strings (`YYYY-MM-DD`).
 
 Submission constraints live in the **`rules`** JSON object (enforced at submit
-time): `min_byte_count`, `min_reference_count`, and `allowed_submission_type`
-(`new` | `expansion` | `both`).
+time): `min_byte_count`, `min_reference_count`, `min_word_count`, and
+`allowed_submission_type` (`new` | `expansion` | `both`).
 ```json
 {
   "name": "Photo Contest",
@@ -316,10 +320,16 @@ time): `min_byte_count`, `min_reference_count`, and `allowed_submission_type`
   "rules": {
     "min_byte_count": 500,
     "min_reference_count": 3,
+    "min_word_count": 300,
     "allowed_submission_type": "new"
   }
 }
 ```
+
+`min_reference_count` and `min_word_count` are checked against stats from
+[XTools](https://xtools.wmcloud.org); if a contest sets one of these but the
+stat can't be fetched (XTools unavailable), evaluation **fails** with a
+try-again error rather than accepting an unverifiable article.
 
 | Status | When | Body |
 |--------|------|------|
@@ -381,12 +391,17 @@ verbatim from the evaluation step:
 | `page_id` | MediaWiki page id |
 | `revision_id` | latest revision id — pins the evaluated version |
 | `namespace` | namespace id (always `0` = main/article space) |
-| `byte_count` | current article size in bytes |
+| `byte_count` | current article size in bytes (MediaWiki) |
+| `word_count` | readable-prose word count (XTools) |
 | `creator`, `creator_id` | first-revision author (page creator) |
 | `created_at` | creation timestamp (ISO 8601) |
-| `ref_new_count`, `ref_reused_count` | `<ref>` counts — new vs reused |
-| `image_count` | images used (localized File-namespace aware) |
-| `outgoing_links`, `incoming_links` | mainspace links out / in (each capped at 500) |
+| `ref_new_count`, `ref_reused_count` | references — unique vs reused (XTools) |
+| `image_count` | files embedded on the page (MediaWiki `prop=images`) |
+| `outgoing_links`, `incoming_links` | mainspace links out / in — full counts (XTools) |
+
+Stats marked *(XTools)* come from the [XTools](https://xtools.wmcloud.org) API;
+if XTools is unavailable they may be `null` (see the eligibility note under
+`/evaluate`). Everything else comes from the MediaWiki API.
 
 Submitting is a **two-step, tamper-proof flow**:
 
@@ -405,33 +420,41 @@ is stored yet. Requires login; the contest must be `active`.
 article never yields a hash:
 - must be a **main-namespace (article)** page — `Talk:`, `User:`, `Category:`, … are rejected;
 - article size ≥ `rules.min_byte_count` (if set);
-- references (new + reused) ≥ `rules.min_reference_count` (if set);
+- references (total = unique + reused) ≥ `rules.min_reference_count` (if set);
+- readable-prose word count ≥ `rules.min_word_count` (if set);
 - if `rules.allowed_submission_type` is **`new`**, the article must be created
   **on/after** the contest `start_date`;
 - if it is **`expansion`**, the article must be created **before** the `start_date`.
+
+If a contest sets `min_reference_count` or `min_word_count` but the corresponding
+stat can't be fetched (XTools unavailable), evaluation returns a `400`
+try-again error instead of accepting the article.
 
 **Request body**
 ```json
 { "article_link": "https://hi.wikipedia.org/wiki/भारत" }
 ```
 
-**Response** `200` — `article_metadata` holds all the fields listed above.
+**Response** `200` — `article_metadata` holds all the fields listed above, and
+`rules` echoes the contest's requirements so the UI can show the article's stats
+against them (e.g. word count vs `min_word_count`).
 ```json
 {
   "article_link": "https://hi.wikipedia.org/wiki/भारत",
   "article_metadata": {
     "article_title": "भारत", "page_id": 59, "revision_id": 1234567,
-    "namespace": 0, "byte_count": 221658,
+    "namespace": 0, "byte_count": 221658, "word_count": 8500,
     "creator": "SomeUser", "created_at": "2004-01-05T12:00:00Z",
     "ref_new_count": 110, "ref_reused_count": 40, "image_count": 30,
-    "outgoing_links": 500, "incoming_links": 500
+    "outgoing_links": 1200, "incoming_links": 9000
   },
-  "hash": "<signed token carrying the metadata>"
+  "hash": "<signed token carrying the metadata>",
+  "rules": { "min_word_count": 300, "min_byte_count": 500, "min_reference_count": 3 }
 }
 ```
 | Status | When | Body |
 |--------|------|------|
-| `200` | evaluated | info + hash (above) |
+| `200` | evaluated | info + hash + rules (above) |
 | `400` | empty link, contest not active, non-article namespace, or ineligible for a `new`/`expansion` contest | `{ "error": "<message>" }` |
 | `401` | not logged in | `{ "error": "Login required" }` |
 | `404` | no such contest | `{ "error": "Contest not found" }` |
@@ -463,11 +486,12 @@ rejected.
 
 List a contest's submissions, newest first. Requires login. The contest
 **creator**, its **jury members**, and **superadmins** see all submissions;
-everyone else sees only their own.
+everyone else sees only their own. The response also includes the contest's
+`rules`, so a jury can compare each submission's stats against the requirements.
 
 | Status | When | Body |
 |--------|------|------|
-| `200` | ok | `{ "submissions": [ <submission object>, ... ] }` |
+| `200` | ok | `{ "rules": { <contest rules> }, "submissions": [ <submission object>, ... ] }` |
 | `401` | not logged in | `{ "error": "Login required" }` |
 | `404` | no such contest | `{ "error": "Contest not found" }` |
 

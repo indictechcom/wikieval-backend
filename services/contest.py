@@ -14,7 +14,7 @@ _SETTABLE_FIELDS = (
     "description", "start_date", "end_date", "rules",
     "marks_setting_accepted", "marks_setting_rejected",
     "scoring_parameters", "automated_settings",
-    "jury_members", "organizers", "outreach_dashboard_url",
+    "jury_members", "organizers", "project_link",
 )
 _DATE_FIELDS = ("start_date", "end_date")
 

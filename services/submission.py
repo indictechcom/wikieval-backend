@@ -46,12 +46,24 @@ def _check_eligibility(contest, metadata):
     if min_bytes and (metadata.get("byte_count") or 0) < min_bytes:
         raise ValueError(f"Article must be at least {min_bytes} bytes")
 
-    # Minimum references (new + reused).
+    # Minimum references (total = unique + reused). If the stat can't be
+    # determined (e.g. XTools unavailable), fail hard rather than let it through.
     min_refs = contest.rule("min_reference_count", 0)
     if min_refs:
+        if metadata.get("ref_new_count") is None:
+            raise ValueError("Could not determine the article's reference count; please try again")
         total_refs = (metadata.get("ref_new_count") or 0) + (metadata.get("ref_reused_count") or 0)
         if total_refs < min_refs:
             raise ValueError(f"Article must have at least {min_refs} references")
+
+    # Minimum readable-prose word count.
+    min_words = contest.rule("min_word_count", 0)
+    if min_words:
+        word_count = metadata.get("word_count")
+        if word_count is None:
+            raise ValueError("Could not determine the article's word count; please try again")
+        if word_count < min_words:
+            raise ValueError(f"Article must have at least {min_words} words")
 
     # Enforce the contest's submission type against the article's creation date:
     # 'new'       -> created on/after the start date;

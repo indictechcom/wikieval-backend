@@ -1,17 +1,25 @@
+"""Article metadata for submissions.
+
+`process_article` combines two sources:
+- **MediaWiki API** — page creator/creation date, current byte size, namespace,
+  exact revision id, and image count (`prop=images`).
+- **XTools** — readable-prose word count, reference counts (total + unique), and
+  full (uncapped) incoming/outgoing link counts.
+"""
+
 import urllib.parse
 
-import mwparserfromhell
 import requests
 
 MEDIAWIKI_API_TIMEOUT = 10
+XTOOLS_API_TIMEOUT = 30
 USER_AGENT = "WikiEval/1.0 (https://wikieval.toolforge.org) Python/requests"
 
-# Cap link counts at one page (500) so each is a single API call. Popular
-# articles report 500 (a floor); contest submissions are typically well under.
-MAX_LINKS = 500
+XTOOLS_API = "https://xtools.wmcloud.org/api/page"
 
 
 def title_from_link(article_link):
+    """Return (base_url, page_title) parsed from a MediaWiki article URL."""
     parsed = urllib.parse.urlparse(article_link)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
     if "/wiki/" in parsed.path:
@@ -24,6 +32,12 @@ def title_from_link(article_link):
 
 
 def process_article(article_link, contest=None):
+    """Fetch article metadata. Raises ValueError if the title can't be parsed,
+    the MediaWiki API is unreachable, or the article doesn't exist.
+
+    XTools stats (words, refs, links) degrade to None if XTools is unavailable.
+    `contest` is accepted for future contest-relative stats but unused here.
+    """
     base_url, page_title = title_from_link(article_link)
     if not page_title:
         raise ValueError("Could not determine the article title from the link")
@@ -59,134 +73,51 @@ def process_article(article_link, contest=None):
 
     page = pages[0]
     creation = (page.get("revisions") or [{}])[0]   # first (oldest) revision
-
-    # References come from the latest wikitext (one more call).
-    wikitext = _fetch_wikitext(base_url, page_title)
-    new_refs, reused_refs = _count_references(wikitext)
     resolved_title = page.get("title", page_title)
+
+    # Word count, references, and (uncapped) link counts come from XTools.
+    prose = _xtools("prose", base_url, resolved_title)
+    links = _xtools("links", base_url, resolved_title)
+    references = prose.get("references")
+    unique_refs = prose.get("unique_references")
+    reused_refs = (
+        references - unique_refs
+        if references is not None and unique_refs is not None else None
+    )
 
     return {
         "article_title": resolved_title,
         "display_title": page.get("displaytitle"),
         "article_url": page.get("fullurl", article_link),
         "page_id": page.get("pageid"),
-        "revision_id": page.get("lastrevid"),       # pins the exact version
-        "namespace": page.get("ns"),                # 0 == main (article) namespace
-        "byte_count": page.get("length"),           # current size, from prop=info
-        "creator": creation.get("user"),            # first revision author
+        "revision_id": page.get("lastrevid"),        # pins the exact version
+        "namespace": page.get("ns"),                 # 0 == main (article) namespace
+        "byte_count": page.get("length"),            # full article size (prop=info)
+        "word_count": prose.get("words"),            # readable prose words (XTools)
+        "creator": creation.get("user"),             # first revision author
         "creator_id": creation.get("userid"),
-        "created_at": creation.get("timestamp"),    # first revision timestamp
-        "ref_new_count": new_refs,
-        "ref_reused_count": reused_refs,
+        "created_at": creation.get("timestamp"),     # first revision timestamp
+        "ref_new_count": unique_refs,                # unique/defining references
+        "ref_reused_count": reused_refs,             # total - unique
         # Files embedded on the page (prop=images) — catches bracketed links,
-        # infobox/template params, and galleries (prefixed or bare). Capped at
-        # imlimit=500; may include decorative template files.
+        # infobox/template params, and galleries; may include decorative files.
         "image_count": len(page.get("images", [])),
-        "outgoing_links": _count_outgoing_links(base_url, resolved_title),
-        "incoming_links": _count_incoming_links(base_url, resolved_title),
+        "outgoing_links": links.get("links_out_count"),  # full count (XTools)
+        "incoming_links": links.get("links_in_count"),   # full count (XTools)
     }
 
 
-def _fetch_wikitext(base_url, page_title):
+def _xtools(endpoint, base_url, page_title):
+    """Call an XTools page API endpoint; return its JSON dict, or {} on failure."""
+    domain = urllib.parse.urlparse(base_url).netloc
+    title = urllib.parse.quote(page_title.replace(" ", "_"), safe="")
     try:
         response = requests.get(
-            f"{base_url}/w/api.php",
-            params={
-                "action": "query",
-                "format": "json",
-                "formatversion": "2",
-                "prop": "revisions",
-                "titles": page_title,
-                "rvprop": "content",
-                "rvslots": "main",
-                "rvlimit": "1",
-                "redirects": "true",
-                "converttitles": "true",
-            },
+            f"{XTOOLS_API}/{endpoint}/{domain}/{title}",
             headers={"User-Agent": USER_AGENT},
-            timeout=MEDIAWIKI_API_TIMEOUT,
+            timeout=XTOOLS_API_TIMEOUT,
         )
         response.raise_for_status()
-        pages = response.json().get("query", {}).get("pages", [])
-    except requests.RequestException:
-        return ""
-    if not pages:
-        return ""
-    revision = (pages[0].get("revisions") or [{}])[0]
-    return revision.get("slots", {}).get("main", {}).get("content", "") or ""
-
-
-def _count_references(wikitext):
-    new_refs = reused_refs = 0
-    for tag in mwparserfromhell.parse(wikitext or "").filter_tags():
-        if str(tag.tag).strip().lower() == "ref":
-            if tag.self_closing:
-                reused_refs += 1
-            else:
-                new_refs += 1
-    return new_refs, reused_refs
-
-
-def _count_outgoing_links(base_url, page_title):
-    count, cont = 0, {}
-    while count < MAX_LINKS:
-        params = {
-            "action": "query",
-            "format": "json",
-            "formatversion": "2",
-            "prop": "links",
-            "titles": page_title,
-            "plnamespace": "0",          # mainspace links only
-            "pllimit": "500",
-            "redirects": "true",
-            "converttitles": "true",
-        }
-        params.update(cont)
-        try:
-            response = requests.get(
-                f"{base_url}/w/api.php", params=params,
-                headers={"User-Agent": USER_AGENT}, timeout=MEDIAWIKI_API_TIMEOUT,
-            )
-            response.raise_for_status()
-            data = response.json()
-        except requests.RequestException:
-            break
-        pages = data.get("query", {}).get("pages", [])
-        if pages:
-            count += len(pages[0].get("links", []))
-        cont = data.get("continue")
-        if not cont:
-            break
-    return count
-
-
-def _count_incoming_links(base_url, page_title):
-    count, cont = 0, {}
-    while count < MAX_LINKS:
-        params = {
-            "action": "query",
-            "format": "json",
-            "formatversion": "2",
-            "list": "backlinks",
-            "bltitle": page_title,
-            "blnamespace": "0",              # mainspace only
-            "bllimit": "500",
-            "blfilterredir": "nonredirects",  # ignore redirect pages
-        }
-        params.update(cont)
-        try:
-            response = requests.get(
-                f"{base_url}/w/api.php", params=params,
-                headers={"User-Agent": USER_AGENT}, timeout=MEDIAWIKI_API_TIMEOUT,
-            )
-            response.raise_for_status()
-            data = response.json()
-        except requests.RequestException:
-            break
-        count += len(data.get("query", {}).get("backlinks", []))
-        cont = data.get("continue")
-        if not cont:
-            break
-    return count
-
-
+        return response.json()
+    except (requests.RequestException, ValueError):
+        return {}

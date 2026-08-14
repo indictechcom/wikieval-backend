@@ -73,6 +73,7 @@ def stub_mediawiki(monkeypatch):
             "revision_id": 999,
             "namespace": 0,
             "byte_count": 1234,
+            "word_count": 500,
             "creator": "MockCreator",
             "creator_id": 1,
             "created_at": "2001-01-01T00:00:00Z",

@@ -98,10 +98,53 @@ def test_evaluate_rejects_below_min_reference_count(db):
         evaluate_article(contest, ARTICLE)
 
 
-def test_evaluate_accepts_when_minimums_met(db):
-    _creator, contest = active_contest(db, rules={"min_byte_count": 1000, "min_reference_count": 3})
+def test_evaluate_rejects_below_min_word_count(db):
+    # stub returns word_count=500; require more.
+    _creator, contest = active_contest(db, rules={"min_word_count": 1000})
 
-    result = evaluate_article(contest, ARTICLE)   # 1234 bytes, 4 refs -> OK
+    with pytest.raises(ValueError, match="at least 1000 words"):
+        evaluate_article(contest, ARTICLE)
+
+
+def test_evaluate_hard_fails_when_word_count_unavailable(db, monkeypatch):
+    # Contest requires a word minimum but the stat couldn't be fetched (XTools down).
+    _creator, contest = active_contest(db, rules={"min_word_count": 100})
+    monkeypatch.setattr(
+        "services.mediawiki.process_article",
+        lambda link, contest=None: {"namespace": 0, "word_count": None},
+    )
+
+    with pytest.raises(ValueError, match="[Cc]ould not determine.*word count"):
+        evaluate_article(contest, ARTICLE)
+
+
+def test_evaluate_hard_fails_when_reference_count_unavailable(db, monkeypatch):
+    _creator, contest = active_contest(db, rules={"min_reference_count": 5})
+    monkeypatch.setattr(
+        "services.mediawiki.process_article",
+        lambda link, contest=None: {"namespace": 0, "ref_new_count": None, "ref_reused_count": None},
+    )
+
+    with pytest.raises(ValueError, match="[Cc]ould not determine.*reference count"):
+        evaluate_article(contest, ARTICLE)
+
+
+def test_evaluate_no_word_rule_ignores_missing_word_count(db, monkeypatch):
+    # No min_word_count rule -> a missing word_count must NOT fail.
+    _creator, contest = active_contest(db)   # no rules
+    monkeypatch.setattr(
+        "services.mediawiki.process_article",
+        lambda link, contest=None: {"namespace": 0, "word_count": None, "ref_new_count": None},
+    )
+
+    assert evaluate_article(contest, ARTICLE)["hash"]
+
+
+def test_evaluate_accepts_when_minimums_met(db):
+    _creator, contest = active_contest(
+        db, rules={"min_byte_count": 1000, "min_reference_count": 3, "min_word_count": 300})
+
+    result = evaluate_article(contest, ARTICLE)   # 1234 bytes, 4 refs, 500 words -> OK
 
     assert result["hash"]
 

@@ -40,6 +40,9 @@ def evaluate(contest_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
+    # Include the contest's rules (min_word_count, etc.) so the UI can show the
+    # article's stats against the requirements without a separate contest fetch.
+    result["rules"] = contest.rules
     return jsonify(result), 200
 
 
@@ -73,7 +76,12 @@ def list_for_contest(contest_id):
     submissions = list_contest_submissions(
         contest_id, viewer_id=user.id, all_submissions=_can_see_all(user, contest)
     )
-    return jsonify({"submissions": [s.to_dict() for s in submissions]}), 200
+    # Include the contest's rules so jury/organizers can see each submission's
+    # stats against the requirements (min_word_count, etc.).
+    return jsonify({
+        "rules": contest.rules,
+        "submissions": [s.to_dict() for s in submissions],
+    }), 200
 
 
 @bp.route('/api/submissions/<int:submission_id>/review', methods=['POST'])
