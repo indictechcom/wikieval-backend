@@ -1,22 +1,36 @@
+import enum
 from datetime import datetime, timezone
+
 from flask_sqlalchemy import SQLAlchemy
 
 db = SQLAlchemy()
 
 
+class RequestStatus(str, enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class ContestStatus(str, enum.Enum):
+    PENDING = "pending"
+    ACTIVE = "active"
+
+
+class SubmissionStatus(str, enum.Enum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
 class User(db.Model):
     __tablename__ = 'users'
 
-    # Primary key
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-
-    username = db.Column(db.String(50), unique=True, nullable=False, index=True)
-
-    user_language = db.Column(db.String(20), default='en')
-
-    # Role-based access control: 'user', 'trusted_member', 'jury', or 'superadmin'
-    role = db.Column(db.String(20), nullable=False, default="user")
-
+    # MediaWiki usernames can be up to 255 chars.
+    username = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    user_language = db.Column(db.String(20), nullable=False, default='en')
+    can_create_contest = db.Column(db.Boolean, nullable=False, default=False)
     created_at = db.Column(
         db.DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -29,7 +43,7 @@ class User(db.Model):
             "id": self.id,
             "username": self.username,
             "user_language": self.user_language,
-            "role": self.role,
+            "can_create_contest": self.can_create_contest,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -38,25 +52,18 @@ class User(db.Model):
         return f"<User {self.username}>"
 
 
-class ContestRequest(db.Model):
-    __tablename__ = 'contest_requests'
+class ContestCreationRequest(db.Model):
+    __tablename__ = 'contest_creation_requests'
 
-    # Primary key
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'),
+                        nullable=False, index=True)
+    reason = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(20), nullable=False,
+                       default=RequestStatus.PENDING.value, index=True)
 
-    # Who is requesting Contest Creator rights
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
-
-    # Why they want the rights
-    reason = db.Column(db.Text, nullable=True)  # required only when edit_count < 300
-
-    # Cached Wikimedia edit count at time of request (for 300+ eligibility check)
-    edit_count = db.Column(db.Integer, nullable=True)
-
-    # Request workflow status
-    status = db.Column(db.String(20), nullable=False, default='pending', index=True)
-
-    reviewed_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    reviewed_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'),
+                            nullable=True)
     reviewed_at = db.Column(db.DateTime(timezone=True), nullable=True)
     rejection_reason = db.Column(db.Text, nullable=True)
 
@@ -66,17 +73,23 @@ class ContestRequest(db.Model):
         nullable=False,
     )
 
-    requester = db.relationship('User', foreign_keys=[user_id], backref='contest_creator_requests')
-    reviewer = db.relationship('User', foreign_keys=[reviewed_by], backref='reviewed_contest_creator_requests')
+    __table_args__ = (
+        db.CheckConstraint(
+            "status IN (" + ", ".join(f"'{s.value}'" for s in RequestStatus) + ")",
+            name='ck_contest_creation_requests_status',
+        ),
+    )
+
+    requester = db.relationship('User', foreign_keys=[user_id], backref='contest_creation_requests')
+    reviewer = db.relationship('User', foreign_keys=[reviewed_by], backref='reviewed_contest_creation_requests')
 
     def to_dict(self):
-        """Serialize this contest request for API responses."""
+        """Serialize this contest-creation request for API responses."""
         return {
             "id": self.id,
             "user_id": self.user_id,
             "username": self.requester.username if self.requester else None,
             "reason": self.reason,
-            "edit_count": self.edit_count,
             "status": self.status,
             "reviewed_by": self.reviewed_by,
             "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
@@ -85,88 +98,84 @@ class ContestRequest(db.Model):
         }
 
     def __repr__(self):
-        """String representation of ContestRequest instance"""
-        return f"<ContestRequest user_id={self.user_id} status={self.status}>"
+        """String representation of ContestCreationRequest instance"""
+        return f"<ContestCreationRequest user_id={self.user_id} status={self.status}>"
 
 
 class Contest(db.Model):
     __tablename__ = 'contests'
 
-    # Primary key
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
 
-    # Core identity
     name = db.Column(db.String(200), nullable=False)
     project_name = db.Column(db.String(100), nullable=False)
-    description = db.Column(db.Text, nullable=True)
-
-    # Creator (references the user row, not the username -
-    # consistent with how ContestRequest.user_id already works)
     created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
-
-    # Schedule
+    status = db.Column(db.String(20), nullable=False,
+                       default=ContestStatus.PENDING.value, index=True)
+    description = db.Column(db.Text, nullable=True)
     start_date = db.Column(db.Date, nullable=True)
     end_date = db.Column(db.Date, nullable=True)
 
-    # Article eligibility requirements
-    min_byte_count = db.Column(db.Integer, nullable=False, default=0)
-    min_reference_count = db.Column(db.Integer, nullable=False, default=0)
-
-    # 'new', 'expansion', or 'both'
-    allowed_submission_type = db.Column(db.String(20), nullable=False, default='both')
-
-    # Simple fixed-points scoring (always available)
+    # Contest rules, as a JSON blob. Well-known keys (read via rule()):
+    #   min_byte_count (int), min_reference_count (int),
+    #   allowed_submission_type ('new' | 'expansion' | 'both').
+    rules = db.Column(db.JSON, nullable=True)
     marks_setting_accepted = db.Column(db.Integer, nullable=False, default=0)
     marks_setting_rejected = db.Column(db.Integer, nullable=False, default=0)
-
-    # Optional multi-parameter scoring config, e.g.
-    # {"enabled": true, "parameters": [{"name": "Quality", "weight": 40}, ...]}
-    # Uses the DB's native JSON type instead of hand-rolled json.dumps/loads
-    # helpers - SQLAlchemy handles the (de)serialization for us.
     scoring_parameters = db.Column(db.JSON, nullable=True)
+    automated_settings = db.Column(db.JSON, nullable=True)
 
-    # Optional list of MediaWiki category URLs an article must belong to
-    categories = db.Column(db.JSON, nullable=True)
-
-    # Optional list of user ids who may organize/jury this contest.
-    # Stored as JSON for now (not a join table) to keep this first PR small;
-    # can be normalized into proper association tables in a follow-up once
-    # routes/permissions for organizers & jury are actually being built.
-    organizer_ids = db.Column(db.JSON, nullable=True)
-    jury_ids = db.Column(db.JSON, nullable=True)
-
-    template_link = db.Column(db.Text, nullable=True)
+    jury_members = db.Column(db.JSON, nullable=True)
+    organizers = db.Column(db.JSON, nullable=True)
     outreach_dashboard_url = db.Column(db.Text, nullable=True)
 
+    # Metadata
     created_at = db.Column(
         db.DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
 
-    creator = db.relationship('User', foreign_keys=[created_by], backref='contests_created')
+    __table_args__ = (
+        db.CheckConstraint(
+            "status IN (" + ", ".join(f"'{s.value}'" for s in ContestStatus) + ")",
+            name='ck_contests_status',
+        ),
+    )
+
+    creator = db.relationship('User', backref='contests_created')
+
+    def rule(self, key, default=None):
+        """Read a rule from the rules JSON blob (e.g. min_byte_count)."""
+        return (self.rules or {}).get(key, default)
+
+    def is_organizer(self, username):
+        """Whether a username manages this contest (creator is always included)."""
+        return username is not None and username in (self.organizers or [])
+
     def to_dict(self):
         """Serialize this contest for API responses."""
         return {
             "id": self.id,
             "name": self.name,
             "project_name": self.project_name,
-            "description": self.description,
+            "status": self.status,
             "created_by": self.created_by,
             "creator_username": self.creator.username if self.creator else None,
+            "description": self.description,
             "start_date": self.start_date.isoformat() if self.start_date else None,
             "end_date": self.end_date.isoformat() if self.end_date else None,
-            "min_byte_count": self.min_byte_count,
-            "min_reference_count": self.min_reference_count,
-            "allowed_submission_type": self.allowed_submission_type,
+            "rules": self.rules,
             "marks_setting_accepted": self.marks_setting_accepted,
             "marks_setting_rejected": self.marks_setting_rejected,
             "scoring_parameters": self.scoring_parameters,
-            "categories": self.categories,
-            "organizer_ids": self.organizer_ids,
-            "jury_ids": self.jury_ids,
-            "template_link": self.template_link,
+            "automated_settings": self.automated_settings,
+            "jury_members": self.jury_members,
+            "organizers": self.organizers,
             "outreach_dashboard_url": self.outreach_dashboard_url,
+            "submission_count": db.session.query(db.func.count(Submission.id))
+                                          .filter(Submission.contest_id == self.id)
+                                          .scalar(),
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -174,131 +183,87 @@ class Contest(db.Model):
         """String representation of Contest instance"""
         return f"<Contest {self.name}>"
 
+
 class Submission(db.Model):
+    """A user's article submission to a contest."""
     __tablename__ = 'submissions'
 
-    # Primary key
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
 
-    # Which contest this submission belongs to
-    contest_id = db.Column(
-        db.Integer,
-        db.ForeignKey('contests.id'),
-        nullable=False,
-        index=True
-    )
+    # Core: who, which contest, and the article. The article title is derived
+    # from the link, so only the link is stored.
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'),
+                        nullable=False, index=True)
+    contest_id = db.Column(db.Integer, db.ForeignKey('contests.id', ondelete='CASCADE'),
+                           nullable=False, index=True)
+    # 766 is the max that keeps the (user_id, contest_id, article_link) unique
+    # index within MySQL's 3072-byte key limit under utf8mb4 (766*4 + 2 ints).
+    # Percent-encoded international titles are long; decode links on write to
+    # keep the stored value short.
+    article_link = db.Column(db.String(766), nullable=False)
 
-    # Which user submitted the article
-    user_id = db.Column(
-        db.Integer,
-        db.ForeignKey('users.id'),
-        nullable=False,
-        index=True
-    )
+    # Article-derived metadata as a single JSON blob: MediaWiki stats (author,
+    # byte count, page id, expansion, links, refs, ...) plus enforcement info
+    # such as categories_added and template_added.
+    article_metadata = db.Column(db.JSON, nullable=True)
 
-    # Submitted MediaWiki article URL
-    article_url = db.Column(db.Text, nullable=False)
+    # Status & scoring
+    status = db.Column(db.String(20), nullable=False,
+                       default=SubmissionStatus.PENDING.value, index=True)
+    score = db.Column(db.Integer, nullable=False, default=0)
+    parameter_scores = db.Column(db.JSON, nullable=True)
+    evaluation_reason = db.Column(db.Text, nullable=True)
+    score_breakdown = db.Column(db.JSON, nullable=True)
 
-    # Article title extracted/verified from the URL
-    article_title = db.Column(db.String(255), nullable=True)
-
-    # Submission lifecycle status
-    # pending_validation / pending_review / reviewed / rejected
-    status = db.Column(
-        db.String(30),
-        nullable=False,
-        default='pending_validation',
-        index=True
-    )
-
-    # Pre-validation results
-    validation_passed = db.Column(db.Boolean, nullable=False, default=False)
-    validation_errors = db.Column(db.JSON, nullable=True)
-
-    # Snapshot of article metrics at submission/validation time
-    byte_count = db.Column(db.Integer, nullable=True)
-    reference_count = db.Column(db.Integer, nullable=True)
-
-    # Jury review
-    reviewed_by = db.Column(
-        db.Integer,
-        db.ForeignKey('users.id'),
-        nullable=True,
-        index=True
-    )
-    reviewed_at = db.Column(
-        db.DateTime(timezone=True),
-        nullable=True
-    )
-
-    # Score awarded after review
-    score = db.Column(db.Float, nullable=True)
-
-    # Optional jury feedback/comments
+    # Review metadata
+    reviewed_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'),
+                            nullable=True)
+    reviewed_at = db.Column(db.DateTime(timezone=True), nullable=True)
     review_comment = db.Column(db.Text, nullable=True)
 
-    created_at = db.Column(
+    # Metadata
+    submitted_at = db.Column(
         db.DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
 
-    updated_at = db.Column(
-        db.DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
-        nullable=False,
+    # A user cannot submit the same article to the same contest twice (but may
+    # submit different articles).
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'contest_id', 'article_link',
+                            name='uq_submission_user_contest_article'),
+        db.CheckConstraint(
+            "status IN (" + ", ".join(f"'{s.value}'" for s in SubmissionStatus) + ")",
+            name='ck_submissions_status',
+        ),
     )
 
-    # Relationships
-    contest = db.relationship(
-        'Contest',
-        foreign_keys=[contest_id],
-        backref='submissions'
-    )
-
-    participant = db.relationship(
-        'User',
-        foreign_keys=[user_id],
-        backref='submissions'
-    )
-
-    reviewer = db.relationship(
-        'User',
-        foreign_keys=[reviewed_by],
-        backref='reviewed_submissions'
-    )
+    submitter = db.relationship('User', foreign_keys=[user_id], backref='submissions')
+    reviewer = db.relationship('User', foreign_keys=[reviewed_by], backref='reviewed_submissions')
+    contest = db.relationship('Contest', backref='submissions')
 
     def to_dict(self):
-        """Serialize submission for API responses."""
+        """Serialize this submission for API responses."""
         return {
             "id": self.id,
-            "contest_id": self.contest_id,
             "user_id": self.user_id,
-            "username": self.participant.username if self.participant else None,
-            "article_url": self.article_url,
-            "article_title": self.article_title,
+            "username": self.submitter.username if self.submitter else None,
+            "contest_id": self.contest_id,
+            "article_link": self.article_link,
+            "article_metadata": self.article_metadata,
             "status": self.status,
-            "validation_passed": self.validation_passed,
-            "validation_errors": self.validation_errors,
-            "byte_count": self.byte_count,
-            "reference_count": self.reference_count,
-            "reviewed_by": self.reviewed_by,
-            "reviewed_at": (
-                self.reviewed_at.isoformat()
-                if self.reviewed_at else None
-            ),
             "score": self.score,
+            "parameter_scores": self.parameter_scores,
+            "evaluation_reason": self.evaluation_reason,
+            "score_breakdown": self.score_breakdown,
+            "reviewed_by": self.reviewed_by,
+            "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
             "review_comment": self.review_comment,
-            "created_at": (
-                self.created_at.isoformat()
-                if self.created_at else None
-            ),
-            "updated_at": (
-                self.updated_at.isoformat()
-                if self.updated_at else None
-            ),
+            "already_reviewed": self.reviewed_at is not None,
+            "submitted_at": self.submitted_at.isoformat() if self.submitted_at else None,
         }
 
     def __repr__(self):
-        return f"<Submission id={self.id} contest_id={self.contest_id} user_id={self.user_id}>"    
+        """String representation of Submission instance"""
+        return f"<Submission {self.id} contest={self.contest_id} status={self.status}>"

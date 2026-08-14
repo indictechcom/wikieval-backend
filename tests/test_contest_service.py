@@ -1,0 +1,221 @@
+"""Unit tests for services.contest."""
+
+from datetime import date
+
+import pytest
+
+from model import Contest, ContestStatus, User
+from services.contest import (
+    ContestLocked,
+    create_contest,
+    get_contest,
+    list_contests,
+    start_contest,
+    update_contest,
+)
+
+
+def make_user(db, username="Creator"):
+    user = User(username=username, can_create_contest=True)
+    db.session.add(user)
+    db.session.commit()
+    return user
+
+
+# --- create ---
+
+def test_create_makes_pending_contest(db):
+    user = make_user(db)
+
+    c = create_contest(user.id, "Photo Contest", "commons", start_date="2026-01-01",
+                       marks_setting_accepted=10,
+                       rules={"min_byte_count": 500}, jury_members=["A", "B"])
+
+    assert c.id is not None
+    assert c.status == ContestStatus.PENDING.value
+    assert c.created_by == user.id
+    assert c.rule("min_byte_count") == 500
+    assert c.jury_members == ["A", "B"]
+    assert Contest.query.count() == 1
+
+
+def test_create_requires_name_and_project(db):
+    user = make_user(db)
+
+    with pytest.raises(ValueError, match="name is required"):
+        create_contest(user.id, "  ", "commons")
+    with pytest.raises(ValueError, match="Project name is required"):
+        create_contest(user.id, "X", "")
+
+
+def test_create_requires_start_date(db):
+    user = make_user(db)
+
+    with pytest.raises(ValueError, match="[Ss]tart date is required"):
+        create_contest(user.id, "X", "commons")   # no start_date
+
+
+def test_create_adds_creator_as_organizer(db):
+    user = make_user(db, "Creator")
+
+    c = create_contest(user.id, "X", "commons", start_date="2026-01-01",
+                       marks_setting_accepted=10)
+
+    assert c.organizers == ["Creator"]
+    assert c.is_organizer("Creator")
+
+
+def test_create_inserts_organizer_and_jury_users(db):
+    creator = make_user(db, "Creator")
+
+    create_contest(creator.id, "X", "commons", start_date="2026-01-01",
+                   marks_setting_accepted=10,
+                   organizers=["OrgA"], jury_members=["JuryB", "JuryC"])
+
+    names = {u.username for u in User.query.all()}
+    assert {"Creator", "OrgA", "JuryB", "JuryC"} <= names
+
+
+def test_create_keeps_provided_organizers_with_creator(db):
+    user = make_user(db, "Creator")
+
+    c = create_contest(user.id, "X", "commons", start_date="2026-01-01",
+                       marks_setting_accepted=10, organizers=["Bob"])
+
+    assert set(c.organizers) == {"Creator", "Bob"}
+
+
+def test_create_requires_accepted_marks(db):
+    user = make_user(db)
+
+    with pytest.raises(ValueError, match="marks_setting_accepted is required"):
+        create_contest(user.id, "X", "commons", start_date="2026-01-01")   # no marks
+
+
+def test_create_rejects_non_positive_accepted_marks(db):
+    user = make_user(db)
+
+    with pytest.raises(ValueError, match="marks_setting_accepted must be a positive"):
+        create_contest(user.id, "X", "commons", start_date="2026-01-01",
+                       marks_setting_accepted=0)
+    with pytest.raises(ValueError, match="marks_setting_accepted must be a positive"):
+        create_contest(user.id, "X", "commons", start_date="2026-01-01",
+                       marks_setting_accepted=-5)
+
+
+def test_create_rejects_positive_rejected_marks(db):
+    user = make_user(db)
+
+    with pytest.raises(ValueError, match="marks_setting_rejected must be zero or negative"):
+        create_contest(user.id, "X", "commons", start_date="2026-01-01",
+                       marks_setting_accepted=10, marks_setting_rejected=5)
+
+
+def test_create_accepts_valid_marks(db):
+    user = make_user(db)
+
+    c = create_contest(user.id, "X", "commons", start_date="2026-01-01",
+                       marks_setting_accepted=10, marks_setting_rejected=-2)
+
+    assert c.marks_setting_accepted == 10
+    assert c.marks_setting_rejected == -2
+
+
+def test_create_parses_iso_dates(db):
+    user = make_user(db)
+
+    c = create_contest(user.id, "X", "commons", start_date="2026-09-01",
+                       marks_setting_accepted=10)
+
+    assert c.start_date == date(2026, 9, 1)
+
+
+def test_create_rejects_bad_date(db):
+    user = make_user(db)
+
+    with pytest.raises(ValueError, match="ISO date"):
+        create_contest(user.id, "X", "commons", start_date="not-a-date")
+
+
+# --- list / get ---
+
+def test_list_defaults_to_active_only(db):
+    user = make_user(db)
+    pending = create_contest(user.id, "Pending", "commons", start_date="2026-01-01", marks_setting_accepted=10)
+    active = create_contest(user.id, "Active", "commons", start_date="2026-01-01", marks_setting_accepted=10)
+    start_contest(active)
+
+    # Default: only active contests.
+    assert [x.id for x in list_contests()] == [active.id]
+    # include_all: pending too.
+    assert {x.id for x in list_contests(include_all=True)} == {pending.id, active.id}
+
+
+def test_list_includes_viewers_own_pending(db):
+    a = make_user(db, "A")
+    b = make_user(db, "B")
+    create_contest(a.id, "ADraft", "commons", start_date="2026-01-01", marks_setting_accepted=10)   # pending, A's
+    create_contest(b.id, "BDraft", "commons", start_date="2026-01-01", marks_setting_accepted=10)   # pending, B's
+    active = create_contest(a.id, "Active", "commons", start_date="2026-01-01", marks_setting_accepted=10)
+    start_contest(active)
+
+    assert {x.name for x in list_contests()} == {"Active"}                       # anon
+    assert {x.name for x in list_contests(viewer_id=a.id)} == {"Active", "ADraft"}  # A sees own pending
+    assert {x.name for x in list_contests(include_all=True)} == {"ADraft", "BDraft", "Active"}
+
+
+def test_get_returns_any_contest(db):
+    user = make_user(db)
+    c = create_contest(user.id, "X", "commons", start_date="2026-01-01", marks_setting_accepted=10)   # pending
+
+    assert get_contest(c.id).id == c.id           # get is not status-filtered
+    assert get_contest(9999) is None
+
+
+# --- update ---
+
+def test_update_while_pending(db):
+    user = make_user(db)
+    c = create_contest(user.id, "X", "commons", start_date="2026-01-01", marks_setting_accepted=10)
+
+    updated = update_contest(c, name="Renamed", rules={"min_byte_count": 1000})
+
+    assert updated.name == "Renamed"
+    assert updated.rule("min_byte_count") == 1000
+
+
+def test_update_rejects_empty_name(db):
+    user = make_user(db)
+    c = create_contest(user.id, "X", "commons", start_date="2026-01-01", marks_setting_accepted=10)
+
+    with pytest.raises(ValueError, match="name cannot be empty"):
+        update_contest(c, name="   ")
+
+
+def test_update_locked_after_start(db):
+    user = make_user(db)
+    c = create_contest(user.id, "X", "commons", start_date="2026-01-01", marks_setting_accepted=10)
+    start_contest(c)
+
+    with pytest.raises(ContestLocked):
+        update_contest(c, name="Too late")
+
+
+# --- start ---
+
+def test_start_transitions_to_active(db):
+    user = make_user(db)
+    c = create_contest(user.id, "X", "commons", start_date="2026-01-01", marks_setting_accepted=10)
+
+    started = start_contest(c)
+
+    assert started.status == ContestStatus.ACTIVE.value
+
+
+def test_start_twice_raises(db):
+    user = make_user(db)
+    c = create_contest(user.id, "X", "commons", start_date="2026-01-01", marks_setting_accepted=10)
+    start_contest(c)
+
+    with pytest.raises(ContestLocked, match="already been started"):
+        start_contest(c)
