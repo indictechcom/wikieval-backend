@@ -100,6 +100,19 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/<path:path>')
+def spa_fallback(path):
+    """Serve the SPA for client-side routes (e.g. /contests) on hard refresh.
+
+    Vue Router handles these in the browser, but a page reload hits Flask
+    directly. API paths still 404 as JSON; static assets are served by Flask's
+    (more specific) static route and never reach here.
+    """
+    if path.startswith('api/'):
+        return jsonify({"error": "Not found"}), 404
+    return render_template('index.html')
+
+
 
 @app.route('/api/user', methods=['GET'])
 def get_base_variables():
