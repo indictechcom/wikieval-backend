@@ -4,7 +4,7 @@ import logging
 import os
 
 import yaml
-from flask import Flask, jsonify, render_template, session
+from flask import Flask, jsonify, render_template, request, session
 from flask_cors import CORS
 from flask_migrate import Migrate
 from flask_mwoauth import MWOAuth
@@ -32,6 +32,15 @@ app.config.update(yaml.safe_load(open(os.path.join(root_dir, 'config.yaml'))))
 # never touch the real database). Must be applied before db.init_app below.
 if os.environ.get('DATABASE_URL'):
     app.config['SQLALCHEMY_DATABASE_URI'] = os.environ['DATABASE_URL']
+
+# MySQL closes idle connections after `wait_timeout`, so a pooled connection
+# can be dead by the next request ("MySQL server has gone away", error 2006).
+# pool_pre_ping validates each connection before handing it out; pool_recycle
+# proactively discards connections older than the timeout window.
+app.config.setdefault('SQLALCHEMY_ENGINE_OPTIONS', {}).update({
+    'pool_pre_ping': True,
+    'pool_recycle': 280,
+})
 
 # Get variables
 ENV = app.config['ENV']
@@ -69,6 +78,11 @@ app.register_blueprint(submission_bp)
 @app.before_request
 def sync_logged_in_user():
     """Lazily persist the logged-in MediaWiki user."""
+    # Static assets (JS/CSS/favicon) don't need a user; skip the DB lookup so
+    # every asset request isn't gated on a database round-trip.
+    if request.endpoint == 'static':
+        return
+
     token = session.get('mwoauth_access_token')
     if not token:
         # Logged out (or never logged in) — drop any stale id.
