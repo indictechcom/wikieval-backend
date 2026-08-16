@@ -6,6 +6,20 @@ from flask_sqlalchemy import SQLAlchemy
 db = SQLAlchemy()
 
 
+def _iso_utc(dt):
+    """ISO-8601 with an explicit UTC offset.
+
+    Timezone-aware columns come back naive on some backends (MySQL), which would
+    serialize without an offset and be misread as *local* time by JS clients.
+    Treat any naive value as UTC so the wire format is always unambiguous.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
 class RequestStatus(str, enum.Enum):
     PENDING = "pending"
     APPROVED = "approved"
@@ -113,8 +127,14 @@ class Contest(db.Model):
     status = db.Column(db.String(20), nullable=False,
                        default=ContestStatus.PENDING.value, index=True)
     description = db.Column(db.Text, nullable=True)
-    start_date = db.Column(db.Date, nullable=True)
-    end_date = db.Column(db.Date, nullable=True)
+    # Contest window, stored as absolute UTC instants. `timezone` is the IANA
+    # zone (e.g. 'Asia/Kolkata') the organizer picked when setting them, so the
+    # deadline can be displayed back in that zone. See _iso_utc() for how these
+    # serialize with an explicit offset. (This instance attribute shadows nothing
+    # — the datetime.timezone import lives in module scope.)
+    start_date = db.Column(db.DateTime(timezone=True), nullable=True)
+    end_date = db.Column(db.DateTime(timezone=True), nullable=True)
+    timezone = db.Column(db.String(64), nullable=False, default="UTC")
 
     # Contest rules, as a JSON blob. Well-known keys (read via rule()):
     #   min_byte_count (int), min_reference_count (int), min_word_count (int),
@@ -163,8 +183,9 @@ class Contest(db.Model):
             "created_by": self.created_by,
             "creator_username": self.creator.username if self.creator else None,
             "description": self.description,
-            "start_date": self.start_date.isoformat() if self.start_date else None,
-            "end_date": self.end_date.isoformat() if self.end_date else None,
+            "start_date": _iso_utc(self.start_date),
+            "end_date": _iso_utc(self.end_date),
+            "timezone": self.timezone,
             "rules": self.rules,
             "marks_setting_accepted": self.marks_setting_accepted,
             "marks_setting_rejected": self.marks_setting_rejected,
@@ -176,7 +197,7 @@ class Contest(db.Model):
             "submission_count": db.session.query(db.func.count(Submission.id))
                                           .filter(Submission.contest_id == self.id)
                                           .scalar(),
-            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "created_at": _iso_utc(self.created_at),
         }
 
     def __repr__(self):

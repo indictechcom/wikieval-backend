@@ -1,5 +1,7 @@
 """Unit tests for services.submission (evaluate + submit flow)."""
 
+from datetime import datetime, timezone
+
 import pytest
 
 from model import Submission, SubmissionStatus, User
@@ -64,6 +66,39 @@ def test_evaluate_rejects_inactive_contest(db):
 
     with pytest.raises(ValueError, match="not open for submissions"):
         evaluate_article(contest, ARTICLE)
+
+
+def test_evaluate_rejects_ended_contest(db):
+    # End instant is in the past -> the submission window is closed.
+    _creator, contest = active_contest(
+        db, start_date="2020-01-01", end_date="2020-02-01T00:00:00+00:00"
+    )
+
+    with pytest.raises(ValueError, match="Contest has ended"):
+        evaluate_article(contest, ARTICLE)
+
+
+def test_submit_rejects_ended_contest(db):
+    # Guard again at submit time, not just evaluate: evaluate while open, then
+    # the contest ends before the hash is submitted.
+    _creator, contest = active_contest(db, start_date="2020-01-01")
+    user = make_user(db, "Editor")
+    ev = evaluate_article(contest, ARTICLE)
+
+    contest.end_date = datetime(2020, 2, 1, tzinfo=timezone.utc)
+
+    with pytest.raises(ValueError, match="Contest has ended"):
+        create_submission(user.id, contest, ev["hash"])
+
+
+def test_evaluate_allows_future_end_date(db):
+    _creator, contest = active_contest(
+        db, end_date="2999-01-01T00:00:00+00:00"
+    )
+
+    result = evaluate_article(contest, ARTICLE)
+
+    assert result["hash"]
 
 
 def test_evaluate_requires_link(db):

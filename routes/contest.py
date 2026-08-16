@@ -15,7 +15,8 @@ bp = Blueprint('contest', __name__)
 
 # Fields accepted from the client on create/update.
 _BODY_FIELDS = (
-    "name", "project_name", "description", "start_date", "end_date", "rules",
+    "name", "project_name", "description", "start_date", "end_date", "timezone",
+    "rules",
     "marks_setting_accepted", "marks_setting_rejected", "scoring_parameters",
     "automated_settings", "jury_members", "organizers",
     "project_link",

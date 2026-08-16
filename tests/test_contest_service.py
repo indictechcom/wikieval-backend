@@ -1,6 +1,6 @@
 """Unit tests for services.contest."""
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -13,6 +13,11 @@ from services.contest import (
     start_contest,
     update_contest,
 )
+
+
+def _naive_utc(dt):
+    """Drop tzinfo for comparison (DB backends return stored instants naive)."""
+    return dt.replace(tzinfo=None) if dt and dt.tzinfo else dt
 
 
 def make_user(db, username="Creator"):
@@ -121,20 +126,45 @@ def test_create_accepts_valid_marks(db):
     assert c.marks_setting_rejected == -2
 
 
-def test_create_parses_iso_dates(db):
+def test_create_parses_bare_date_as_utc_midnight(db):
     user = make_user(db)
 
     c = create_contest(user.id, "X", "commons", start_date="2026-09-01",
                        marks_setting_accepted=10)
 
-    assert c.start_date == date(2026, 9, 1)
+    # A bare date is anchored to the start of that day in UTC. (The DB returns
+    # the stored instant naive; the wall-clock value is what matters.)
+    assert _naive_utc(c.start_date) == datetime(2026, 9, 1)
+
+
+def test_create_parses_iso_datetime_with_offset(db):
+    user = make_user(db)
+
+    # Aug 24 23:59 in IST (UTC+5:30) -> Aug 24 18:29 UTC.
+    c = create_contest(user.id, "X", "commons",
+                       start_date="2026-08-24T00:00:00+05:30",
+                       end_date="2026-08-24T23:59:00+05:30",
+                       timezone="Asia/Kolkata",
+                       marks_setting_accepted=10)
+
+    assert _naive_utc(c.start_date) == datetime(2026, 8, 23, 18, 30)
+    assert _naive_utc(c.end_date) == datetime(2026, 8, 24, 18, 29)
+    assert c.timezone == "Asia/Kolkata"
 
 
 def test_create_rejects_bad_date(db):
     user = make_user(db)
 
-    with pytest.raises(ValueError, match="ISO date"):
+    with pytest.raises(ValueError, match="ISO date or datetime"):
         create_contest(user.id, "X", "commons", start_date="not-a-date")
+
+
+def test_create_rejects_unknown_timezone(db):
+    user = make_user(db)
+
+    with pytest.raises(ValueError, match="Unknown timezone"):
+        create_contest(user.id, "X", "commons", start_date="2026-09-01",
+                       timezone="Mars/Olympus", marks_setting_accepted=10)
 
 
 # --- list / get ---

@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import case, func, or_
 
@@ -11,7 +12,7 @@ class ContestLocked(Exception):
 
 
 _SETTABLE_FIELDS = (
-    "description", "start_date", "end_date", "rules",
+    "description", "start_date", "end_date", "timezone", "rules",
     "marks_setting_accepted", "marks_setting_rejected",
     "scoring_parameters", "automated_settings",
     "jury_members", "organizers", "project_link",
@@ -20,16 +21,48 @@ _DATE_FIELDS = ("start_date", "end_date")
 
 
 def _coerce_dates(fields):
-    """Parse ISO date strings (YYYY-MM-DD) into date objects."""
+    """Normalize incoming contest fields:
+
+    - start_date/end_date: parse an ISO datetime (or bare date) into a
+      timezone-aware UTC datetime. The client converts the organizer's local
+      wall-clock time to a UTC instant, so we just anchor and store it.
+    - timezone: validate it's a real IANA zone; blank falls back to 'UTC'.
+    """
     out = dict(fields)
     for key in _DATE_FIELDS:
         value = out.get(key)
         if isinstance(value, str):
-            try:
-                out[key] = date.fromisoformat(value)
-            except ValueError:
-                raise ValueError(f"{key} must be an ISO date (YYYY-MM-DD)")
+            out[key] = _parse_utc(key, value)
+
+    tz = out.get("timezone")
+    if isinstance(tz, str):
+        out["timezone"] = tz.strip() or "UTC"
+        _validate_timezone(out["timezone"])
     return out
+
+
+def _parse_utc(key, value):
+    """Parse an ISO datetime (or bare YYYY-MM-DD) as a UTC-aware datetime."""
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            dt = datetime.combine(date.fromisoformat(text), datetime.min.time())
+        except ValueError:
+            raise ValueError(f"{key} must be an ISO date or datetime")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _validate_timezone(name):
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(f"Unknown timezone: {name}")
 
 
 def _validate_marks(fields):

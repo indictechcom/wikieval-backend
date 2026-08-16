@@ -18,9 +18,24 @@ def _serializer():
     return URLSafeSerializer(current_app.config["SECRET_KEY"], salt=_EVALUATION_SALT)
 
 
+def _as_utc(dt):
+    """Treat a naive datetime as UTC; return aware datetimes unchanged."""
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _submissions_closed(contest):
+    """Whether the contest window has closed (its end instant has passed)."""
+    end = _as_utc(contest.end_date)
+    return end is not None and datetime.now(timezone.utc) > end
+
+
 def evaluate_article(contest, article_link):
     if contest.status != ContestStatus.ACTIVE.value:
         raise ValueError("Contest is not open for submissions")
+    if _submissions_closed(contest):
+        raise ValueError("Contest has ended; submissions are closed")
     if not article_link or not article_link.strip():
         raise ValueError("Article link is required")
 
@@ -69,28 +84,31 @@ def _check_eligibility(contest, metadata):
     # 'new'       -> created on/after the start date;
     # 'expansion' -> existed (created) before the start date.
     sub_type = contest.rule("allowed_submission_type", "both")
-    if sub_type in ("new", "expansion") and contest.start_date:
-        created = _created_date(metadata.get("created_at"))
+    start = _as_utc(contest.start_date)
+    if sub_type in ("new", "expansion") and start:
+        created = _created_instant(metadata.get("created_at"))
         if created is not None:
-            if sub_type == "new" and created < contest.start_date:
+            if sub_type == "new" and created < start:
                 raise ValueError(
                     "This contest only accepts newly created articles; this "
                     "article was created before the contest start date"
                 )
-            if sub_type == "expansion" and created >= contest.start_date:
+            if sub_type == "expansion" and created >= start:
                 raise ValueError(
                     "This contest only accepts expansions of existing articles; "
                     "this article was created on or after the contest start date"
                 )
 
 
-def _created_date(timestamp):
+def _created_instant(timestamp):
+    """The article's creation timestamp as a UTC-aware datetime."""
     if not timestamp:
         return None
     try:
-        return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).date()
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return _as_utc(dt)
 
 
 def _load_evaluation(token, contest):
@@ -123,6 +141,8 @@ def create_submission(user_id, contest, token):
 
     if contest.status != ContestStatus.ACTIVE.value:
         raise ValueError("Contest is not open for submissions")
+    if _submissions_closed(contest):
+        raise ValueError("Contest has ended; submissions are closed")
 
     link = data["article_link"]
     existing = Submission.query.filter_by(
