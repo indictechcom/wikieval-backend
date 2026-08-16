@@ -169,13 +169,17 @@ def _with_creator(organizers, creator):
 
 
 # Fields that stay editable after a contest has started (its config is locked).
-_EDITABLE_WHEN_LOCKED = {"organizers", "jury_members"}
+# end_date is included so a running contest can be extended (or closed early);
+# the contest's timezone is not, so the deadline instant stays interpreted in the
+# zone it was created with.
+_EDITABLE_WHEN_LOCKED = {"organizers", "jury_members", "end_date"}
 
 
 def update_contest(contest, **fields):
     if contest.status != ContestStatus.PENDING.value and set(fields) - _EDITABLE_WHEN_LOCKED:
         raise ContestLocked(
-            "Contest is locked; only organizers and jury members can be edited"
+            "Contest is locked; only organizers, jury members and the end date "
+            "can be edited"
         )
 
     fields = _coerce_dates(fields)

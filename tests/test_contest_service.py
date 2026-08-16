@@ -231,6 +231,28 @@ def test_update_locked_after_start(db):
         update_contest(c, name="Too late")
 
 
+def test_update_end_date_allowed_after_start(db):
+    # A running contest can be extended (or closed early) by editing end_date.
+    user = make_user(db)
+    c = create_contest(user.id, "X", "commons", start_date="2026-01-01",
+                       end_date="2026-06-01T23:59:59+00:00", marks_setting_accepted=10)
+    start_contest(c)
+
+    update_contest(c, end_date="2026-09-01T23:59:59+00:00")
+
+    assert _naive_utc(c.end_date) == datetime(2026, 9, 1, 23, 59, 59)
+
+
+def test_update_start_date_still_locked_after_start(db):
+    # Only end_date is unlocked; start_date (and other config) stays locked.
+    user = make_user(db)
+    c = create_contest(user.id, "X", "commons", start_date="2026-01-01", marks_setting_accepted=10)
+    start_contest(c)
+
+    with pytest.raises(ContestLocked):
+        update_contest(c, start_date="2026-02-01")
+
+
 # --- start ---
 
 def test_start_transitions_to_active(db):
