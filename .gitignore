@@ -218,3 +218,6 @@ __marimo__/
 .streamlit/secrets.toml
 
 config.yaml
+scripts/
+tests/test_article_engine.py
+tests/test_prose_counter.py

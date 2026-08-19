@@ -11,6 +11,8 @@ import urllib.parse
 
 import requests
 
+from services import editor_prose_counter
+
 MEDIAWIKI_API_TIMEOUT = 10
 XTOOLS_API_TIMEOUT = 30
 USER_AGENT = "WikiEval/1.0 (https://wikieval.toolforge.org) Python/requests"
@@ -75,7 +77,8 @@ def process_article(article_link, contest=None):
     creation = (page.get("revisions") or [{}])[0]   # first (oldest) revision
     resolved_title = page.get("title", page_title)
 
-    # Word count, references, and (uncapped) link counts come from XTools.
+    # References and (uncapped) link counts come from XTools; the word count is
+    # our own editor-authored prose counter (not XTools' readable-prose count).
     prose = _xtools("prose", base_url, resolved_title)
     links = _xtools("links", base_url, resolved_title)
     references = prose.get("references")
@@ -93,7 +96,7 @@ def process_article(article_link, contest=None):
         "revision_id": page.get("lastrevid"),        # pins the exact version
         "namespace": page.get("ns"),                 # 0 == main (article) namespace
         "byte_count": page.get("length"),            # full article size (prop=info)
-        "word_count": prose.get("words"),            # readable prose words (XTools)
+        "word_count": _editor_prose_word_count(base_url, page.get("lastrevid")),
         "creator": creation.get("user"),             # first revision author
         "creator_id": creation.get("userid"),
         "created_at": creation.get("timestamp"),     # first revision timestamp
@@ -105,6 +108,20 @@ def process_article(article_link, contest=None):
         "outgoing_links": links.get("links_out_count"),  # full count (XTools)
         "incoming_links": links.get("links_in_count"),   # full count (XTools)
     }
+
+
+def _editor_prose_word_count(base_url, revid):
+    """Editor-authored prose word count of a revision (our own counter, not
+    XTools). Returns None if the revision's wikitext can't be fetched, matching
+    the eligibility flow's "word count unavailable -> try again" behaviour."""
+    if not revid:
+        return None
+    try:
+        cats, files = editor_prose_counter.fetch_namespace_names(base_url)
+        counts = editor_prose_counter.count_revisions_words(base_url, [revid], cats, files)
+        return counts.get(revid)
+    except requests.RequestException:
+        return None
 
 
 def _xtools(endpoint, base_url, page_title):
