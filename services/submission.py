@@ -6,6 +6,7 @@ from itsdangerous import BadData, URLSafeSerializer
 
 from model import ContestStatus, Submission, SubmissionStatus, db
 from services import mediawiki
+from services.audit import log_review
 
 _EVALUATION_SALT = "article-evaluation"
 
@@ -165,8 +166,19 @@ def create_submission(user_id, contest, token):
 
 def review_submission(submission, reviewer_id, decision, score=None,
                       review_comment=None, parameter_scores=None):
-    if submission.status != SubmissionStatus.PENDING.value:
-        raise ValueError("Submission has already been reviewed")
+    # A pending submission can be reviewed by any jury member; an already-reviewed
+    # one may be edited only by the jury member who reviewed it (not overridden
+    # by a different jury member).
+    already_reviewed = submission.status != SubmissionStatus.PENDING.value
+    if (already_reviewed and submission.reviewed_by is not None
+            and submission.reviewed_by != reviewer_id):
+        raise ValueError("This submission was already reviewed by another jury member")
+
+    # Capture the pre-edit state for the audit trail (an edit overwrites it) —
+    # includes parameter_scores so multi-parameter reviews keep their breakdown.
+    previous = ((submission.status, submission.score,
+                 submission.parameter_scores, submission.reviewed_by)
+                if already_reviewed else None)
 
     contest = submission.contest
     if decision == "accept":
@@ -183,4 +195,5 @@ def review_submission(submission, reviewer_id, decision, score=None,
     submission.reviewed_by = reviewer_id
     submission.reviewed_at = datetime.now(timezone.utc)
     db.session.commit()
+    log_review(submission, reviewer_id, decision, is_edit=already_reviewed, previous=previous)
     return submission

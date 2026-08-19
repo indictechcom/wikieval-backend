@@ -367,11 +367,78 @@ def test_review_rejects_invalid_decision(db):
         review_submission(s, _creator.id, "maybe")
 
 
-def test_review_blocks_double_review(db):
+def test_same_reviewer_can_edit_their_review(db):
+    _creator, contest = active_contest(db, marks_setting_accepted=10)
+    user = make_user(db, "Sub")
+    s = submit(contest, user)
+    review_submission(s, _creator.id, "accept", score=7)
+    assert s.status == SubmissionStatus.ACCEPTED.value and s.score == 7
+
+    # the same jury member re-reviews (edits) their decision
+    edited = review_submission(s, _creator.id, "reject")
+    assert edited.status == SubmissionStatus.REJECTED.value
+    assert edited.reviewed_by == _creator.id
+
+
+def test_review_actions_are_audit_logged(db):
+    import logging
+
+    from services.audit import review_audit
+
+    captured = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            captured.append(record.getMessage())
+
+    handler = _Capture()
+    review_audit.addHandler(handler)
+    try:
+        _creator, contest = active_contest(db, marks_setting_accepted=10)
+        user = make_user(db, "Sub")
+        s = submit(contest, user)
+        review_submission(s, _creator.id, "accept", score=7)   # first review
+        review_submission(s, _creator.id, "reject")            # edit by same jury
+    finally:
+        review_audit.removeHandler(handler)
+
+    assert any("action=new" in m and "decision=accept" in m for m in captured)
+    edit = next(m for m in captured if "action=edit" in m)
+    assert "decision=reject" in edit and "previous=" in edit  # keeps the prior state
+
+
+def test_multi_parameter_review_logs_the_breakdown(db):
+    import logging
+
+    from services.audit import review_audit
+
+    captured = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            captured.append(record.getMessage())
+
+    handler = _Capture()
+    review_audit.addHandler(handler)
+    try:
+        _creator, contest = active_contest(db, marks_setting_accepted=10)
+        user = make_user(db, "Sub")
+        s = submit(contest, user)
+        review_submission(s, _creator.id, "accept", score=7,
+                          parameter_scores={"Quality": 5, "Sources": 2})
+    finally:
+        review_audit.removeHandler(handler)
+
+    line = next(m for m in captured if "action=new" in m)
+    assert "params=" in line and "Quality" in line and "Sources" in line  # breakdown kept
+
+
+def test_different_jury_cannot_override_review(db):
     _creator, contest = active_contest(db)
+    other_juror = make_user(db, "Juror2")
     user = make_user(db, "Sub")
     s = submit(contest, user)
     review_submission(s, _creator.id, "accept")
 
-    with pytest.raises(ValueError, match="already been reviewed"):
-        review_submission(s, _creator.id, "reject")
+    with pytest.raises(ValueError, match="another jury member"):
+        review_submission(s, other_juror.id, "reject")

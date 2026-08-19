@@ -279,6 +279,7 @@ class Submission(db.Model):
             "evaluation_reason": self.evaluation_reason,
             "score_breakdown": self.score_breakdown,
             "reviewed_by": self.reviewed_by,
+            "reviewed_by_username": self.reviewer.username if self.reviewer else None,
             "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
             "review_comment": self.review_comment,
             "already_reviewed": self.reviewed_at is not None,
