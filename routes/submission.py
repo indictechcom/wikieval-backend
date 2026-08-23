@@ -5,6 +5,7 @@ from services.submission import (
     create_submission,
     evaluate_article,
     get_submission,
+    import_submission,
     list_contest_submissions,
     review_submission,
 )
@@ -58,6 +59,30 @@ def create(contest_id):
     data = request.get_json(silent=True) or {}
     try:
         submission = create_submission(user.id, contest, data.get('hash'))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify(submission.to_dict()), 201
+
+
+@bp.route('/api/contests/<int:contest_id>/submissions/import', methods=['POST'])
+def import_one(contest_id):
+    """Superadmin-only: restore one submission from an exported CSV row. The
+    client sends rows one at a time (with progress), so each request re-fetches
+    a single article's metadata without risking a bulk timeout."""
+    user = current_user()
+    if user is None:
+        return jsonify({"error": "Login required"}), 401
+    if not is_superadmin(user.username):
+        return jsonify({"error": "Superadmin rights required"}), 403
+    contest = get_contest(contest_id)
+    if contest is None:
+        return jsonify({"error": "Contest not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    try:
+        submission = import_submission(
+            contest, data.get('username'), data.get('article_link'))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 

@@ -3,10 +3,12 @@ from datetime import datetime, timezone
 
 from flask import current_app
 from itsdangerous import BadData, URLSafeSerializer
+from sqlalchemy.exc import IntegrityError
 
-from model import ContestStatus, Submission, SubmissionStatus, db
+from model import ContestStatus, Submission, SubmissionStatus, User, db
 from services import mediawiki
 from services.audit import log_review
+from services.user import ensure_users
 
 _EVALUATION_SALT = "article-evaluation"
 
@@ -161,6 +163,50 @@ def create_submission(user_id, contest, token):
     )
     db.session.add(submission)
     db.session.commit()
+    return submission
+
+
+def import_submission(contest, username, article_link):
+    """Superadmin restore: create one submission for `username` from an exported
+    row. Unlike the normal flow this bypasses the tamper-proof hash and
+    eligibility checks (it restores already-accepted data), always lands as
+    `pending` (reviews are re-done), and re-fetches the article's metadata so the
+    imported submission is fully functional. One article per call keeps each
+    request fast (no bulk timeout)."""
+    if not username or not username.strip():
+        raise ValueError("A submitter username is required")
+    if not article_link or not article_link.strip():
+        raise ValueError("An article link is required")
+
+    # Create the submitter's User row if it doesn't exist yet (e.g. after a DB
+    # reset, before they log in), then resolve their id.
+    ensure_users([username.strip()])
+    submitter = User.query.filter_by(username=username.strip()).first()
+
+    link = _normalize_link(article_link)
+    existing = Submission.query.filter_by(
+        user_id=submitter.id, contest_id=contest.id, article_link=link
+    ).first()
+    if existing is not None:
+        raise ValueError("This article was already imported for this submitter")
+
+    metadata = mediawiki.process_article(link, contest)
+
+    submission = Submission(
+        user_id=submitter.id,
+        contest_id=contest.id,
+        article_link=link,
+        article_metadata=metadata,
+        status=SubmissionStatus.PENDING.value,
+    )
+    db.session.add(submission)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # Concurrent import of the same (submitter, article) — the unique
+        # constraint fired after our duplicate pre-check. Treat as a duplicate.
+        db.session.rollback()
+        raise ValueError("This article was already imported for this submitter")
     return submission
 
 

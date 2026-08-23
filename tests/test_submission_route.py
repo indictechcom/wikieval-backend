@@ -98,6 +98,60 @@ def test_participant_can_submit(client, db, login_as):
     assert body["article_metadata"]["article_title"] == "Cat"
 
 
+SUPERADMIN = "Jayprakash12345"  # hard-coded in app.SUPERADMINS
+IMPORT_URL = "/api/contests/{}/submissions/import"
+
+
+def test_import_requires_superadmin(client, db, login_as):
+    _creator, contest = active_contest(db)
+    make_user(db, "Alice")
+    login_as(client, "Alice")  # a normal user, not superadmin
+    resp = client.post(IMPORT_URL.format(contest.id),
+                       json={"username": "Bob", "article_link": ARTICLE})
+    assert resp.status_code == 403
+
+
+def test_import_requires_login(client, db):
+    _creator, contest = active_contest(db)
+    resp = client.post(IMPORT_URL.format(contest.id),
+                       json={"username": "Bob", "article_link": ARTICLE})
+    assert resp.status_code == 401
+
+
+def test_superadmin_imports_submission_creating_submitter(client, db, login_as):
+    _creator, contest = active_contest(db)
+    login_as(client, SUPERADMIN)
+    # "Bob" does not exist yet — import must create his User row.
+    assert User.query.filter_by(username="Bob").first() is None
+
+    resp = client.post(IMPORT_URL.format(contest.id),
+                       json={"username": "Bob", "article_link": ARTICLE})
+    body = resp.get_json()
+
+    assert resp.status_code == 201, body
+    assert body["status"] == "pending"          # reviews are not restored
+    assert body["username"] == "Bob"
+    assert body["article_metadata"]["article_title"] == "Cat"  # metadata re-fetched
+    assert User.query.filter_by(username="Bob").first() is not None
+
+
+def test_import_rejects_duplicate(client, db, login_as):
+    _creator, contest = active_contest(db)
+    login_as(client, SUPERADMIN)
+    payload = {"username": "Bob", "article_link": ARTICLE}
+    assert client.post(IMPORT_URL.format(contest.id), json=payload).status_code == 201
+    resp = client.post(IMPORT_URL.format(contest.id), json=payload)
+    assert resp.status_code == 400
+
+
+def test_import_requires_username_and_link(client, db, login_as):
+    _creator, contest = active_contest(db)
+    login_as(client, SUPERADMIN)
+    r1 = client.post(IMPORT_URL.format(contest.id), json={"article_link": ARTICLE})
+    r2 = client.post(IMPORT_URL.format(contest.id), json={"username": "Bob"})
+    assert r1.status_code == 400 and r2.status_code == 400
+
+
 def test_submit_requires_prior_evaluation(client, db, login_as):
     _creator, contest = active_contest(db)
     make_user(db, "Alice")

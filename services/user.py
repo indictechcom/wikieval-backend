@@ -1,3 +1,5 @@
+from sqlalchemy.exc import IntegrityError
+
 from model import User, db
 
 
@@ -28,5 +30,11 @@ def ensure_users(usernames):
             existing.add(username)
             created = True
     if created:
-        db.session.commit()
+        try:
+            db.session.commit()
+        except IntegrityError:
+            # A concurrent request created one of these usernames first (the
+            # username column is unique). Roll back — the rows now exist either
+            # way, so callers that re-query by username still succeed.
+            db.session.rollback()
 
