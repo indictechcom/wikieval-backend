@@ -12,9 +12,9 @@ class ContestLocked(Exception):
 
 
 _SETTABLE_FIELDS = (
-    "description", "start_date", "end_date", "timezone", "rules",
+    "description", "start_date", "end_date", "timezone", "eligibility_rules",
     "marks_setting_accepted", "marks_setting_rejected",
-    "scoring_parameters", "automated_settings",
+    "scoring_parameters",
     "jury_members", "organizers", "project_link",
 )
 _DATE_FIELDS = ("start_date", "end_date")

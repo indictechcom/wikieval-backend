@@ -16,6 +16,7 @@ import pytest
 import app as app_module
 from app import app as flask_app
 from model import db as _db
+from services import editor_prose_delta as delta_module
 from services import mediawiki as mediawiki_module
 
 # `sqlite://` uses SQLAlchemy's SingletonThreadPool (one connection per thread),
@@ -84,6 +85,13 @@ def stub_mediawiki(monkeypatch):
             "incoming_links": 5,
         }
     monkeypatch.setattr(mediawiki_module, "process_article", fake_process_article)
+
+    # Stub the per-user contribution delta engine so tests never hit the network.
+    def fake_analyze(article_link, start=None, end=None, user=None, **kwargs):
+        return {"users": [
+            {"user": user or "MockCreator", "words_added": 250, "words_net": 220},
+        ]}
+    monkeypatch.setattr(delta_module, "analyze", fake_analyze)
 
 
 @pytest.fixture()

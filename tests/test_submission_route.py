@@ -47,7 +47,7 @@ def test_evaluate_requires_login(client, db):
 
 
 def test_evaluate_returns_info_and_hash(client, db, login_as):
-    _creator, contest = active_contest(db, rules={"min_word_count": 300})
+    _creator, contest = active_contest(db, eligibility_rules={"min_word_count": 300})
     make_user(db, "Alice")
     login_as(client, "Alice")
 
@@ -58,7 +58,7 @@ def test_evaluate_returns_info_and_hash(client, db, login_as):
     assert resp.status_code == 200
     assert body["hash"]
     assert body["article_metadata"]["article_title"] == "Cat"
-    assert body["rules"]["min_word_count"] == 300   # requirements shown to the user
+    assert body["eligibility_rules"]["min_word_count"] == 300   # requirements shown to the user
 
 
 def test_evaluate_rejects_pending_contest(client, db, login_as):
@@ -210,7 +210,7 @@ def test_list_requires_login(client, db):
 
 
 def test_participant_sees_only_own(client, db, login_as):
-    _creator, contest = active_contest(db, rules={"min_word_count": 300})
+    _creator, contest = active_contest(db, eligibility_rules={"min_word_count": 300})
     alice = make_user(db, "Alice")
     bob = make_user(db, "Bob")
     _submit(contest, alice, "https://en.wikipedia.org/wiki/A")
@@ -223,7 +223,7 @@ def test_participant_sees_only_own(client, db, login_as):
 
     assert resp.status_code == 200
     assert links == ["https://en.wikipedia.org/wiki/A"]
-    assert body["rules"]["min_word_count"] == 300   # requirements shown to jury/participants
+    assert body["eligibility_rules"]["min_word_count"] == 300   # requirements shown to jury/participants
 
 
 def test_creator_sees_all(client, db, login_as):

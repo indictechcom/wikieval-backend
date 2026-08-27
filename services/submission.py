@@ -6,8 +6,9 @@ from itsdangerous import BadData, URLSafeSerializer
 from sqlalchemy.exc import IntegrityError
 
 from model import ContestStatus, Submission, SubmissionStatus, User, db
-from services import mediawiki
+from services import editor_prose_delta, mediawiki
 from services.audit import log_review
+from services.eligibility import check_eligibility
 from services.user import ensure_users
 
 _EVALUATION_SALT = "article-evaluation"
@@ -15,6 +16,29 @@ _EVALUATION_SALT = "article-evaluation"
 
 def _normalize_link(article_link):
     return urllib.parse.unquote(article_link.strip())
+
+
+def _submitter_contribution(contest, article_link, submitter):
+    """Words the submitter authored in this article *during the contest window*
+    (start_date → end_date), via the editor-prose delta engine. Returns a
+    {'words_added': gross, 'words_net': net} dict, or None on any failure so it
+    never blocks submission. This is the per-user contribution — distinct from
+    the article's total word_count."""
+    if not submitter:
+        return None
+    try:
+        start = contest.start_date.isoformat() if contest.start_date else None
+        end = contest.end_date.isoformat() if contest.end_date else None
+        report = editor_prose_delta.analyze(
+            article_link, start=start, end=end, user=submitter)
+        users = report.get("users") or []
+        if not users:  # submitter made no edits in the window
+            return {"words_added": 0, "words_net": 0}
+        u = users[0]
+        return {"words_added": u.get("words_added", 0),
+                "words_net": u.get("words_net", 0)}
+    except Exception:  # noqa: BLE001 — enrichment must never break submission
+        return None
 
 
 def _serializer():
@@ -34,7 +58,7 @@ def _submissions_closed(contest):
     return end is not None and datetime.now(timezone.utc) > end
 
 
-def evaluate_article(contest, article_link):
+def evaluate_article(contest, article_link, submitter=None):
     if contest.status != ContestStatus.ACTIVE.value:
         raise ValueError("Contest is not open for submissions")
     if _submissions_closed(contest):
@@ -44,7 +68,11 @@ def evaluate_article(contest, article_link):
 
     link = _normalize_link(article_link)
     metadata = mediawiki.process_article(link, contest)
-    _check_eligibility(contest, metadata)
+    check_eligibility(contest, metadata, submitter=submitter)
+
+    # Words the submitter authored during the contest window (the per-user delta,
+    # not the article's total). Baked into the signed hash like the rest.
+    metadata["submitter_contribution"] = _submitter_contribution(contest, link, submitter)
 
     token = _serializer().dumps({
         "contest_id": contest.id,
@@ -52,66 +80,6 @@ def evaluate_article(contest, article_link):
         "article_metadata": metadata,
     })
     return {"article_link": link, "article_metadata": metadata, "hash": token}
-
-
-def _check_eligibility(contest, metadata):
-    # Only main-namespace (article) pages — reject Talk:, User:, Category:, etc.
-    if metadata.get("namespace") != 0:
-        raise ValueError("Only main-namespace (article) pages can be submitted")
-
-    # Minimum article size (bytes).
-    min_bytes = contest.rule("min_byte_count", 0)
-    if min_bytes and (metadata.get("byte_count") or 0) < min_bytes:
-        raise ValueError(f"Article must be at least {min_bytes} bytes")
-
-    # Minimum references (total = unique + reused). If the stat can't be
-    # determined (e.g. XTools unavailable), fail hard rather than let it through.
-    min_refs = contest.rule("min_reference_count", 0)
-    if min_refs:
-        if metadata.get("ref_new_count") is None:
-            raise ValueError("Could not determine the article's reference count; please try again")
-        total_refs = (metadata.get("ref_new_count") or 0) + (metadata.get("ref_reused_count") or 0)
-        if total_refs < min_refs:
-            raise ValueError(f"Article must have at least {min_refs} references")
-
-    # Minimum readable-prose word count.
-    min_words = contest.rule("min_word_count", 0)
-    if min_words:
-        word_count = metadata.get("word_count")
-        if word_count is None:
-            raise ValueError("Could not determine the article's word count; please try again")
-        if word_count < min_words:
-            raise ValueError(f"Article must have at least {min_words} words")
-
-    # Enforce the contest's submission type against the article's creation date:
-    # 'new'       -> created on/after the start date;
-    # 'expansion' -> existed (created) before the start date.
-    sub_type = contest.rule("allowed_submission_type", "both")
-    start = _as_utc(contest.start_date)
-    if sub_type in ("new", "expansion") and start:
-        created = _created_instant(metadata.get("created_at"))
-        if created is not None:
-            if sub_type == "new" and created < start:
-                raise ValueError(
-                    "This contest only accepts newly created articles; this "
-                    "article was created before the contest start date"
-                )
-            if sub_type == "expansion" and created >= start:
-                raise ValueError(
-                    "This contest only accepts expansions of existing articles; "
-                    "this article was created on or after the contest start date"
-                )
-
-
-def _created_instant(timestamp):
-    """The article's creation timestamp as a UTC-aware datetime."""
-    if not timestamp:
-        return None
-    try:
-        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return _as_utc(dt)
 
 
 def _load_evaluation(token, contest):
@@ -191,6 +159,8 @@ def import_submission(contest, username, article_link):
         raise ValueError("This article was already imported for this submitter")
 
     metadata = mediawiki.process_article(link, contest)
+    metadata["submitter_contribution"] = _submitter_contribution(
+        contest, link, username.strip())
 
     submission = Submission(
         user_id=submitter.id,

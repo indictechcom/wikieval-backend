@@ -34,7 +34,7 @@ def test_create_makes_pending_contest(db):
 
     c = create_contest(user.id, "Photo Contest", "commons", start_date="2026-01-01",
                        marks_setting_accepted=10,
-                       rules={"min_byte_count": 500}, jury_members=["A", "B"])
+                       eligibility_rules={"min_byte_count": 500}, jury_members=["A", "B"])
 
     assert c.id is not None
     assert c.status == ContestStatus.PENDING.value
@@ -208,7 +208,7 @@ def test_update_while_pending(db):
     user = make_user(db)
     c = create_contest(user.id, "X", "commons", start_date="2026-01-01", marks_setting_accepted=10)
 
-    updated = update_contest(c, name="Renamed", rules={"min_byte_count": 1000})
+    updated = update_contest(c, name="Renamed", eligibility_rules={"min_byte_count": 1000})
 
     assert updated.name == "Renamed"
     assert updated.rule("min_byte_count") == 1000
