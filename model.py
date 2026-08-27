@@ -136,14 +136,15 @@ class Contest(db.Model):
     end_date = db.Column(db.DateTime(timezone=True), nullable=True)
     timezone = db.Column(db.String(64), nullable=False, default="UTC")
 
-    # Contest rules, as a JSON blob. Well-known keys (read via rule()):
-    #   min_byte_count (int), min_reference_count (int), min_word_count (int),
-    #   allowed_submission_type ('new' | 'expansion' | 'both').
-    rules = db.Column(db.JSON, nullable=True)
+    # Article-submission ELIGIBILITY rules, as a JSON dict {rule_key: value}
+    # (see services/eligibility.py for the catalog). Enforced at /evaluate.
+    # Separate from scoring (marks_setting_* / scoring_parameters).
+    #   e.g. {"min_byte_count": 500, "min_word_count": 300,
+    #         "allowed_submission_type": "new", "author_only": true}
+    eligibility_rules = db.Column(db.JSON, nullable=True)
     marks_setting_accepted = db.Column(db.Integer, nullable=False, default=0)
     marks_setting_rejected = db.Column(db.Integer, nullable=False, default=0)
     scoring_parameters = db.Column(db.JSON, nullable=True)
-    automated_settings = db.Column(db.JSON, nullable=True)
 
     jury_members = db.Column(db.JSON, nullable=True)
     organizers = db.Column(db.JSON, nullable=True)
@@ -166,8 +167,8 @@ class Contest(db.Model):
     creator = db.relationship('User', backref='contests_created')
 
     def rule(self, key, default=None):
-        """Read a rule from the rules JSON blob (e.g. min_byte_count)."""
-        return (self.rules or {}).get(key, default)
+        """Read an eligibility rule value (e.g. min_byte_count)."""
+        return (self.eligibility_rules or {}).get(key, default)
 
     def is_organizer(self, username):
         """Whether a username manages this contest (creator is always included)."""
@@ -186,11 +187,10 @@ class Contest(db.Model):
             "start_date": _iso_utc(self.start_date),
             "end_date": _iso_utc(self.end_date),
             "timezone": self.timezone,
-            "rules": self.rules,
+            "eligibility_rules": self.eligibility_rules,
             "marks_setting_accepted": self.marks_setting_accepted,
             "marks_setting_rejected": self.marks_setting_rejected,
             "scoring_parameters": self.scoring_parameters,
-            "automated_settings": self.automated_settings,
             "jury_members": self.jury_members,
             "organizers": self.organizers,
             "project_link": self.project_link,

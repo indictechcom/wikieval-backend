@@ -34,7 +34,7 @@ def test_create_makes_pending_contest(db):
 
     c = create_contest(user.id, "Photo Contest", "commons", start_date="2026-01-01",
                        marks_setting_accepted=10,
-                       rules={"min_byte_count": 500}, jury_members=["A", "B"])
+                       eligibility_rules={"min_byte_count": 500}, jury_members=["A", "B"])
 
     assert c.id is not None
     assert c.status == ContestStatus.PENDING.value
@@ -58,6 +58,46 @@ def test_create_requires_start_date(db):
 
     with pytest.raises(ValueError, match="[Ss]tart date is required"):
         create_contest(user.id, "X", "commons")   # no start_date
+
+
+def test_create_rejects_end_before_start(db):
+    user = make_user(db)
+
+    with pytest.raises(ValueError, match="End date must be on or after"):
+        create_contest(user.id, "X", "commons", start_date="2026-12-01",
+                       end_date="2026-01-01", marks_setting_accepted=10)
+
+
+def test_create_allows_past_dates(db):
+    # Past start/end is allowed on purpose (campaigns start before setup; the
+    # words-added metric relies on the start date).
+    user = make_user(db)
+
+    c = create_contest(user.id, "Past", "commons", start_date="2020-01-01",
+                       end_date="2020-02-01", marks_setting_accepted=10)
+
+    assert c.start_date.year == 2020 and c.end_date.year == 2020
+
+
+def test_create_allows_equal_start_and_end(db):
+    user = make_user(db)
+
+    c = create_contest(user.id, "Same", "commons", start_date="2026-01-01",
+                       end_date="2026-01-01", marks_setting_accepted=10)
+
+    assert c.start_date.date() == c.end_date.date()
+
+
+def test_update_rejects_end_before_existing_start(db):
+    # A locked contest can only edit end_date — the new end is checked against
+    # the contest's existing start.
+    user = make_user(db, "Creator")
+    c = create_contest(user.id, "X", "commons", start_date="2026-06-01",
+                       marks_setting_accepted=10)
+    start_contest(c)  # now active/locked
+
+    with pytest.raises(ValueError, match="End date must be on or after"):
+        update_contest(c, end_date="2026-01-01")
 
 
 def test_create_adds_creator_as_organizer(db):
@@ -208,7 +248,7 @@ def test_update_while_pending(db):
     user = make_user(db)
     c = create_contest(user.id, "X", "commons", start_date="2026-01-01", marks_setting_accepted=10)
 
-    updated = update_contest(c, name="Renamed", rules={"min_byte_count": 1000})
+    updated = update_contest(c, name="Renamed", eligibility_rules={"min_byte_count": 1000})
 
     assert updated.name == "Renamed"
     assert updated.rule("min_byte_count") == 1000

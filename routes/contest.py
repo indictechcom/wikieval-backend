@@ -9,16 +9,23 @@ from services.contest import (
     start_contest,
     update_contest,
 )
+from services.eligibility import catalog as eligibility_catalog
 from utils.auth import current_user, is_superadmin, may_create_contest
 
 bp = Blueprint('contest', __name__)
 
+
+@bp.route('/api/eligibility-rules', methods=['GET'])
+def eligibility_rules_catalog():
+    """The catalog of eligibility rules a creator can add (drives the form)."""
+    return jsonify({"rules": eligibility_catalog()}), 200
+
 # Fields accepted from the client on create/update.
 _BODY_FIELDS = (
     "name", "project_name", "description", "start_date", "end_date", "timezone",
-    "rules",
+    "eligibility_rules",
     "marks_setting_accepted", "marks_setting_rejected", "scoring_parameters",
-    "automated_settings", "jury_members", "organizers",
+    "jury_members", "organizers",
     "project_link",
 )
 

@@ -117,9 +117,47 @@ def test_evaluate_includes_revision_id_and_namespace(db):
     assert result["article_metadata"]["namespace"] == 0
 
 
+def test_evaluate_includes_submitter_contribution(db):
+    # The per-user words-added delta (from the stubbed engine) is attached to
+    # the metadata and thus baked into the signed hash.
+    _creator, contest = active_contest(db)
+
+    result = evaluate_article(contest, ARTICLE, submitter="Alice")
+
+    contrib = result["article_metadata"]["submitter_contribution"]
+    assert contrib == {"words_added": 250, "words_net": 220}
+
+
+def test_submitter_contribution_zero_when_no_edits_in_window(db, monkeypatch):
+    # The engine returns no users (submitter made no edits) -> {added:0, net:0}.
+    _creator, contest = active_contest(db)
+    monkeypatch.setattr("services.editor_prose_delta.analyze",
+                        lambda link, **kw: {"users": []})
+
+    result = evaluate_article(contest, ARTICLE, submitter="Alice")
+
+    assert result["article_metadata"]["submitter_contribution"] == {
+        "words_added": 0, "words_net": 0}
+
+
+def test_submitter_contribution_is_best_effort(db, monkeypatch):
+    # If the delta engine raises (network down, article gone), submission must
+    # still succeed with submitter_contribution = None (never blocked).
+    _creator, contest = active_contest(db)
+
+    def boom(link, **kw):
+        raise RuntimeError("engine unavailable")
+    monkeypatch.setattr("services.editor_prose_delta.analyze", boom)
+
+    result = evaluate_article(contest, ARTICLE, submitter="Alice")
+
+    assert result["hash"]  # evaluation still succeeded
+    assert result["article_metadata"]["submitter_contribution"] is None
+
+
 def test_evaluate_rejects_below_min_byte_count(db):
     # stub returns byte_count=1234; require more.
-    _creator, contest = active_contest(db, rules={"min_byte_count": 5000})
+    _creator, contest = active_contest(db, eligibility_rules={"min_byte_count": 5000})
 
     with pytest.raises(ValueError, match="at least 5000 bytes"):
         evaluate_article(contest, ARTICLE)
@@ -127,7 +165,7 @@ def test_evaluate_rejects_below_min_byte_count(db):
 
 def test_evaluate_rejects_below_min_reference_count(db):
     # stub returns 3 new + 1 reused = 4 references; require more.
-    _creator, contest = active_contest(db, rules={"min_reference_count": 10})
+    _creator, contest = active_contest(db, eligibility_rules={"min_reference_count": 10})
 
     with pytest.raises(ValueError, match="at least 10 references"):
         evaluate_article(contest, ARTICLE)
@@ -135,7 +173,7 @@ def test_evaluate_rejects_below_min_reference_count(db):
 
 def test_evaluate_rejects_below_min_word_count(db):
     # stub returns word_count=500; require more.
-    _creator, contest = active_contest(db, rules={"min_word_count": 1000})
+    _creator, contest = active_contest(db, eligibility_rules={"min_word_count": 1000})
 
     with pytest.raises(ValueError, match="at least 1000 words"):
         evaluate_article(contest, ARTICLE)
@@ -143,7 +181,7 @@ def test_evaluate_rejects_below_min_word_count(db):
 
 def test_evaluate_hard_fails_when_word_count_unavailable(db, monkeypatch):
     # Contest requires a word minimum but the stat couldn't be fetched (XTools down).
-    _creator, contest = active_contest(db, rules={"min_word_count": 100})
+    _creator, contest = active_contest(db, eligibility_rules={"min_word_count": 100})
     monkeypatch.setattr(
         "services.mediawiki.process_article",
         lambda link, contest=None: {"namespace": 0, "word_count": None},
@@ -154,7 +192,7 @@ def test_evaluate_hard_fails_when_word_count_unavailable(db, monkeypatch):
 
 
 def test_evaluate_hard_fails_when_reference_count_unavailable(db, monkeypatch):
-    _creator, contest = active_contest(db, rules={"min_reference_count": 5})
+    _creator, contest = active_contest(db, eligibility_rules={"min_reference_count": 5})
     monkeypatch.setattr(
         "services.mediawiki.process_article",
         lambda link, contest=None: {"namespace": 0, "ref_new_count": None, "ref_reused_count": None},
@@ -177,7 +215,7 @@ def test_evaluate_no_word_rule_ignores_missing_word_count(db, monkeypatch):
 
 def test_evaluate_accepts_when_minimums_met(db):
     _creator, contest = active_contest(
-        db, rules={"min_byte_count": 1000, "min_reference_count": 3, "min_word_count": 300})
+        db, eligibility_rules={"min_byte_count": 1000, "min_reference_count": 3, "min_word_count": 300})
 
     result = evaluate_article(contest, ARTICLE)   # 1234 bytes, 4 refs, 500 words -> OK
 
@@ -198,7 +236,7 @@ def test_evaluate_rejects_non_mainspace(db, monkeypatch):
 def test_evaluate_new_contest_rejects_article_created_before_start(db, monkeypatch):
     creator = make_user(db, "Creator", can_create=True)
     contest = create_contest(creator.id, "C", "commons",
-                             rules={"allowed_submission_type": "new"}, start_date="2026-01-01",
+                             eligibility_rules={"allowed_submission_type": "new"}, start_date="2026-01-01",
                              marks_setting_accepted=10)
     start_contest(contest)
     monkeypatch.setattr(
@@ -213,7 +251,7 @@ def test_evaluate_new_contest_rejects_article_created_before_start(db, monkeypat
 def test_evaluate_new_contest_accepts_article_created_after_start(db, monkeypatch):
     creator = make_user(db, "Creator", can_create=True)
     contest = create_contest(creator.id, "C", "commons",
-                             rules={"allowed_submission_type": "new"}, start_date="2026-01-01",
+                             eligibility_rules={"allowed_submission_type": "new"}, start_date="2026-01-01",
                              marks_setting_accepted=10)
     start_contest(contest)
     monkeypatch.setattr(
@@ -229,7 +267,7 @@ def test_evaluate_new_contest_accepts_article_created_after_start(db, monkeypatc
 def test_evaluate_expansion_contest_rejects_article_created_after_start(db, monkeypatch):
     creator = make_user(db, "Creator", can_create=True)
     contest = create_contest(creator.id, "C", "commons",
-                             rules={"allowed_submission_type": "expansion"}, start_date="2026-01-01",
+                             eligibility_rules={"allowed_submission_type": "expansion"}, start_date="2026-01-01",
                              marks_setting_accepted=10)
     start_contest(contest)
     monkeypatch.setattr(
@@ -244,7 +282,7 @@ def test_evaluate_expansion_contest_rejects_article_created_after_start(db, monk
 def test_evaluate_expansion_contest_accepts_article_created_before_start(db, monkeypatch):
     creator = make_user(db, "Creator", can_create=True)
     contest = create_contest(creator.id, "C", "commons",
-                             rules={"allowed_submission_type": "expansion"}, start_date="2026-01-01",
+                             eligibility_rules={"allowed_submission_type": "expansion"}, start_date="2026-01-01",
                              marks_setting_accepted=10)
     start_contest(contest)
     monkeypatch.setattr(

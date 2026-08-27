@@ -106,14 +106,14 @@ def test_creator_can_create(client, db, login_as):
     resp = client.post(
         "/api/contests",
         json={"name": "Photo", "project_name": "commons", "start_date": "2026-09-01",
-              "marks_setting_accepted": 10, "rules": {"min_byte_count": 100}},
+              "marks_setting_accepted": 10, "eligibility_rules": {"min_byte_count": 100}},
     )
     body = resp.get_json()
 
     assert resp.status_code == 201
     assert body["status"] == "pending"
     assert body["creator_username"] == CREATOR
-    assert body["rules"]["min_byte_count"] == 100
+    assert body["eligibility_rules"]["min_byte_count"] == 100
 
 
 def test_create_requires_start_date(client, db, login_as):

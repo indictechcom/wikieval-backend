@@ -191,7 +191,8 @@ def _active(db, **fields):
 
 
 def test_evaluate_blocked_after_end(db):
-    c = _active(db, end_date="2000-01-01T00:00:00+00:00")
+    # A past window (start 2020-01-01 default, end after it but still past).
+    c = _active(db, end_date="2020-06-01T00:00:00+00:00")
     with pytest.raises(ValueError, match="Contest has ended"):
         evaluate_article(c, ARTICLE)
 
