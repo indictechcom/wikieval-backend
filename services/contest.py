@@ -75,6 +75,19 @@ def _validate_marks(fields):
         raise ValueError("marks_setting_rejected must be zero or negative")
 
 
+def _validate_date_order(start, end):
+    """Reject a window whose end is before its start. Past dates are allowed
+    on purpose — a campaign often starts before its contest is set up, and the
+    words-added metric relies on the (possibly past) start date."""
+    def _aware(dt):  # a value read back from the DB may be naive; treat as UTC
+        if dt is not None and dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+    start, end = _aware(start), _aware(end)
+    if start is not None and end is not None and end < start:
+        raise ValueError("End date must be on or after the start date")
+
+
 def list_contests(include_all=False, viewer_id=None):
     query = Contest.query
     if not include_all:
@@ -138,6 +151,7 @@ def create_contest(user_id, name, project_name, **fields):
     if fields.get("marks_setting_accepted") is None:
         raise ValueError("marks_setting_accepted is required")
     _validate_marks(fields)
+    _validate_date_order(fields.get("start_date"), fields.get("end_date"))
 
     contest = Contest(
         name=name.strip(),
@@ -195,6 +209,12 @@ def update_contest(contest, **fields):
     if "start_date" in fields and not fields["start_date"]:
         raise ValueError("Start date is required")
     _validate_marks(fields)
+    # Compare the effective window: a locked contest can update only end_date,
+    # so check the new end against the contest's existing start.
+    _validate_date_order(
+        fields["start_date"] if "start_date" in fields else contest.start_date,
+        fields["end_date"] if "end_date" in fields else contest.end_date,
+    )
 
     for key in _SETTABLE_FIELDS:
         if key in fields:
