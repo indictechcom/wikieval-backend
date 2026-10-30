@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 
 from model import ContestStatus, Submission, SubmissionStatus, User, db
 from services import editor_prose_delta, mediawiki
-from services.audit import log_review
+from services.audit import log_review, log_stats_update
 from services.eligibility import check_eligibility
 from services.user import ensure_users
 
@@ -58,7 +58,40 @@ def _submissions_closed(contest):
     return end is not None and datetime.now(timezone.utc) > end
 
 
-def evaluate_article(contest, article_link, submitter=None):
+TAKEN_BY_OTHER = ("This article has already been submitted to this contest by "
+                  "another participant. Each article can be submitted by one "
+                  "participant only.")
+
+
+def _existing_submission(contest, link):
+    """The single submission (any participant) of `link` in `contest`, or None.
+    One article per contest is enforced by uq_submission_contest_article."""
+    return Submission.query.filter_by(contest_id=contest.id, article_link=link).first()
+
+
+def _existing_summary(submission):
+    """Compact view of a participant's own earlier submission of the same
+    article, returned from /evaluate so the UI can offer ignore-or-update."""
+    return {
+        "id": submission.id,
+        "status": submission.status,
+        "score": submission.score,
+        "already_reviewed": submission.reviewed_at is not None,
+        "reviewed_by_username": (submission.reviewer.username
+                                 if submission.reviewer else None),
+        "reviewed_at": (submission.reviewed_at.isoformat()
+                        if submission.reviewed_at else None),
+        "submitted_at": (submission.submitted_at.isoformat()
+                         if submission.submitted_at else None),
+    }
+
+
+def evaluate_article(contest, article_link, submitter=None, submitter_id=None):
+    """Step 1 of the submit flow. Besides the eligibility checks this enforces
+    one-article-one-participant: if another participant already submitted the
+    link, evaluation fails. If `submitter_id` already submitted it, the result
+    carries `existing_submission` so the client can offer to keep the existing
+    entry or refresh its stats (see create_submission(update_existing=True))."""
     if contest.status != ContestStatus.ACTIVE.value:
         raise ValueError("Contest is not open for submissions")
     if _submissions_closed(contest):
@@ -67,6 +100,11 @@ def evaluate_article(contest, article_link, submitter=None):
         raise ValueError("Article link is required")
 
     link = _normalize_link(article_link)
+    existing = _existing_submission(contest, link)
+    if (existing is not None and submitter_id is not None
+            and existing.user_id != submitter_id):
+        raise ValueError(TAKEN_BY_OTHER)
+
     metadata = mediawiki.process_article(link, contest)
     check_eligibility(contest, metadata, submitter=submitter)
 
@@ -79,7 +117,10 @@ def evaluate_article(contest, article_link, submitter=None):
         "article_link": link,
         "article_metadata": metadata,
     })
-    return {"article_link": link, "article_metadata": metadata, "hash": token}
+    result = {"article_link": link, "article_metadata": metadata, "hash": token}
+    if existing is not None and submitter_id is not None:
+        result["existing_submission"] = _existing_summary(existing)
+    return result
 
 
 def _load_evaluation(token, contest):
@@ -107,7 +148,32 @@ def list_contest_submissions(contest_id, viewer_id=None, all_submissions=False):
     ).all()
 
 
-def create_submission(user_id, contest, token):
+def _reset_review(submission):
+    """Clear a submission's jury review so it goes back to the pending queue.
+    Returns the previous (status, score, parameter_scores, reviewed_by) tuple
+    for the audit trail, or None if it had not been reviewed."""
+    previous = None
+    if submission.status != SubmissionStatus.PENDING.value or submission.reviewed_by:
+        previous = (submission.status, submission.score,
+                    submission.parameter_scores, submission.reviewed_by)
+    submission.status = SubmissionStatus.PENDING.value
+    submission.score = 0
+    submission.parameter_scores = None
+    submission.evaluation_reason = None
+    submission.score_breakdown = None
+    submission.reviewed_by = None
+    submission.reviewed_at = None
+    submission.review_comment = None
+    return previous
+
+
+def create_submission(user_id, contest, token, update_existing=False):
+    """Step 2 of the submit flow. Creates the submission from the signed
+    evaluation. If `user_id` already submitted this article to the contest:
+    with update_existing=False this is an error (the client should first show
+    the participant the ignore-or-update choice); with update_existing=True the
+    existing row's article stats are replaced by the fresh evaluation and any
+    jury review is removed, so the article is reviewed again from scratch."""
     data = _load_evaluation(token, contest)
 
     if contest.status != ContestStatus.ACTIVE.value:
@@ -116,11 +182,17 @@ def create_submission(user_id, contest, token):
         raise ValueError("Contest has ended; submissions are closed")
 
     link = data["article_link"]
-    existing = Submission.query.filter_by(
-        user_id=user_id, contest_id=contest.id, article_link=link
-    ).first()
+    existing = _existing_submission(contest, link)
     if existing is not None:
-        raise ValueError("You have already submitted this article to this contest")
+        if existing.user_id != user_id:
+            raise ValueError(TAKEN_BY_OTHER)
+        if not update_existing:
+            raise ValueError("You have already submitted this article to this contest")
+        previous = _reset_review(existing)
+        existing.article_metadata = data["article_metadata"]
+        db.session.commit()
+        log_stats_update(existing, previous)
+        return existing
 
     submission = Submission(
         user_id=user_id,
@@ -130,7 +202,13 @@ def create_submission(user_id, contest, token):
         status=SubmissionStatus.PENDING.value,
     )
     db.session.add(submission)
-    db.session.commit()
+    try:
+        db.session.commit()
+    except IntegrityError:
+        # Another participant submitted the same article between our check and
+        # the commit — the (contest, article) unique constraint fired.
+        db.session.rollback()
+        raise ValueError(TAKEN_BY_OTHER)
     return submission
 
 
@@ -152,10 +230,10 @@ def import_submission(contest, username, article_link):
     submitter = User.query.filter_by(username=username.strip()).first()
 
     link = _normalize_link(article_link)
-    existing = Submission.query.filter_by(
-        user_id=submitter.id, contest_id=contest.id, article_link=link
-    ).first()
+    existing = _existing_submission(contest, link)
     if existing is not None:
+        if existing.user_id != submitter.id:
+            raise ValueError(TAKEN_BY_OTHER)
         raise ValueError("This article was already imported for this submitter")
 
     metadata = mediawiki.process_article(link, contest)
@@ -173,10 +251,10 @@ def import_submission(contest, username, article_link):
     try:
         db.session.commit()
     except IntegrityError:
-        # Concurrent import of the same (submitter, article) — the unique
+        # Concurrent import of the same article — the (contest, article) unique
         # constraint fired after our duplicate pre-check. Treat as a duplicate.
         db.session.rollback()
-        raise ValueError("This article was already imported for this submitter")
+        raise ValueError("This article has already been submitted to this contest")
     return submission
 
 
@@ -197,10 +275,10 @@ def add_submission_for(contest, username, article_link):
     submitter = User.query.filter_by(username=username.strip()).first()
 
     link = _normalize_link(article_link)
-    existing = Submission.query.filter_by(
-        user_id=submitter.id, contest_id=contest.id, article_link=link
-    ).first()
+    existing = _existing_submission(contest, link)
     if existing is not None:
+        if existing.user_id != submitter.id:
+            raise ValueError(TAKEN_BY_OTHER)
         raise ValueError("This participant has already submitted this article to this contest")
 
     metadata = mediawiki.process_article(link, contest)
@@ -220,7 +298,7 @@ def add_submission_for(contest, username, article_link):
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
-        raise ValueError("This participant has already submitted this article to this contest")
+        raise ValueError("This article has already been submitted to this contest")
     return submission
 
 

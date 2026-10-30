@@ -430,6 +430,13 @@ If a contest sets `min_reference_count` or `min_word_count` but the correspondin
 stat can't be fetched (XTools unavailable), evaluation returns a `400`
 try-again error instead of accepting the article.
 
+**One article, one participant** — an article can be in a contest only once:
+- if **another participant** already submitted the link, evaluation fails with
+  `400` ("…already been submitted to this contest by another participant…");
+- if the **logged-in user** already submitted it, evaluation still succeeds and
+  the response carries `existing_submission` (below) so the client can offer to
+  keep the existing entry or refresh its stats (see step 2's `update` flag).
+
 **Request body**
 ```json
 { "article_link": "https://hi.wikipedia.org/wiki/भारत" }
@@ -449,13 +456,21 @@ against them (e.g. word count vs `min_word_count`).
     "outgoing_links": 1200, "incoming_links": 9000
   },
   "hash": "<signed token carrying the metadata>",
-  "rules": { "min_word_count": 300, "min_byte_count": 500, "min_reference_count": 3 }
+  "rules": { "min_word_count": 300, "min_byte_count": 500, "min_reference_count": 3 },
+  "existing_submission": {
+    "id": 42, "status": "accepted", "score": 7, "already_reviewed": true,
+    "reviewed_by_username": "SomeJuror", "reviewed_at": "2026-10-20T10:00:00+00:00",
+    "submitted_at": "2026-10-18T09:00:00+00:00"
+  }
 }
 ```
+`existing_submission` is present **only** when the logged-in user already
+submitted this article to this contest.
+
 | Status | When | Body |
 |--------|------|------|
 | `200` | evaluated | info + hash + rules (above) |
-| `400` | empty link, contest not active, non-article namespace, or ineligible for a `new`/`expansion` contest | `{ "error": "<message>" }` |
+| `400` | empty link, contest not active, non-article namespace, ineligible for a `new`/`expansion` contest, or already submitted by another participant | `{ "error": "<message>" }` |
 | `401` | not logged in | `{ "error": "Login required" }` |
 | `404` | no such contest | `{ "error": "Contest not found" }` |
 
@@ -466,21 +481,27 @@ login; the contest must be `active`.
 
 **Request body**
 ```json
-{ "hash": "<the hash returned by /evaluate>" }
+{ "hash": "<the hash returned by /evaluate>", "update": false }
 ```
 The link and metadata are taken from the signed hash; any `article_metadata` in
-the body is ignored.
+the body is ignored. `update` (optional, default `false`) is for the case where
+`/evaluate` returned `existing_submission`: with `update: true` the user's
+existing submission of this article is **updated in place** — its article stats
+are replaced by the fresh evaluation and any **jury review is removed** (status
+back to `pending`, score 0, reviewer/comment/parameter scores cleared) so it is
+reviewed again from scratch. The removal is written to the review audit log.
 
 | Status | When | Body |
 |--------|------|------|
 | `201` | created (status `pending`) | submission object |
-| `400` | missing/invalid hash, hash for a different contest, contest not active, or duplicate article | `{ "error": "<message>" }` |
+| `200` | `update: true` and the user's existing submission was refreshed | submission object |
+| `400` | missing/invalid hash, hash for a different contest, contest not active, article already submitted by another participant, or own duplicate without `update` | `{ "error": "<message>" }` |
 | `401` | not logged in | `{ "error": "Login required" }` |
 | `404` | no such contest | `{ "error": "Contest not found" }` |
 
-A user cannot submit the same article to the same contest twice. The `hash` is a
-signed token (via the app `SECRET_KEY`); tampering with it or its metadata is
-rejected.
+An article can be submitted to a contest **once, by one participant only**
+(unique on contest + article link). The `hash` is a signed token (via the app
+`SECRET_KEY`); tampering with it or its metadata is rejected.
 
 ## GET `/api/contests/<id>/submissions`
 

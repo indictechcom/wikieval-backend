@@ -480,3 +480,173 @@ def test_different_jury_cannot_override_review(db):
 
     with pytest.raises(ValueError, match="another jury member"):
         review_submission(s, other_juror.id, "reject")
+
+
+# --- one article per contest (any participant) ---
+
+def test_evaluate_blocks_article_taken_by_another_participant(db):
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    bob = make_user(db, "Bob")
+    submit(contest, alice)
+
+    with pytest.raises(ValueError, match="another participant"):
+        evaluate_article(contest, ARTICLE, submitter="Bob", submitter_id=bob.id)
+
+
+def test_evaluate_without_submitter_does_not_block(db):
+    # No submitter identity → evaluate can't tell whose it is; create decides.
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    submit(contest, alice)
+
+    assert evaluate_article(contest, ARTICLE)["hash"]
+
+
+def test_create_blocks_article_taken_by_another_participant(db):
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    bob = make_user(db, "Bob")
+    submit(contest, alice)
+    ev = evaluate_article(contest, ARTICLE)   # hash minted without identity
+
+    with pytest.raises(ValueError, match="another participant"):
+        create_submission(bob.id, contest, ev["hash"])
+    assert Submission.query.count() == 1
+
+
+def test_create_update_flag_cannot_take_over_another_participants_article(db):
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    bob = make_user(db, "Bob")
+    submit(contest, alice)
+    ev = evaluate_article(contest, ARTICLE)
+
+    with pytest.raises(ValueError, match="another participant"):
+        create_submission(bob.id, contest, ev["hash"], update_existing=True)
+
+
+def test_evaluate_reports_own_existing_submission(db):
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    first = submit(contest, alice)
+    review_submission(first, _creator.id, "accept", score=7)
+
+    result = evaluate_article(contest, ARTICLE, submitter="Alice", submitter_id=alice.id)
+
+    existing = result["existing_submission"]
+    assert existing["id"] == first.id
+    assert existing["status"] == "accepted"
+    assert existing["score"] == 7
+    assert existing["already_reviewed"] is True
+    assert existing["reviewed_by_username"] == "Creator"
+    assert result["hash"]   # still usable for the update
+
+
+def test_evaluate_omits_existing_when_none(db):
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+
+    result = evaluate_article(contest, ARTICLE, submitter="Alice", submitter_id=alice.id)
+
+    assert "existing_submission" not in result
+
+
+def test_update_existing_refreshes_stats_and_removes_review(db, monkeypatch):
+    from services import mediawiki as mediawiki_module
+
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    first = submit(contest, alice)
+    review_submission(first, _creator.id, "accept", score=7, review_comment="good",
+                      parameter_scores={"Quality": 7})
+    original_submitted_at = first.submitted_at
+
+    # The article grew since the first submission.
+    real = mediawiki_module.process_article
+    monkeypatch.setattr(
+        mediawiki_module, "process_article",
+        lambda link, contest=None: {**real(link, contest), "word_count": 900})
+
+    ev = evaluate_article(contest, ARTICLE, submitter="Alice", submitter_id=alice.id)
+    updated = create_submission(alice.id, contest, ev["hash"], update_existing=True)
+
+    assert updated.id == first.id                     # same row, no duplicate
+    assert Submission.query.count() == 1
+    assert updated.article_metadata["word_count"] == 900
+    assert updated.status == SubmissionStatus.PENDING.value
+    assert updated.score == 0
+    assert updated.parameter_scores is None
+    assert updated.review_comment is None
+    assert updated.reviewed_by is None
+    assert updated.reviewed_at is None
+    assert updated.submitted_at == original_submitted_at
+
+
+def test_update_existing_on_pending_submission_just_refreshes(db):
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    first = submit(contest, alice)
+
+    ev = evaluate_article(contest, ARTICLE, submitter="Alice", submitter_id=alice.id)
+    updated = create_submission(alice.id, contest, ev["hash"], update_existing=True)
+
+    assert updated.id == first.id
+    assert updated.status == SubmissionStatus.PENDING.value
+    assert Submission.query.count() == 1
+
+
+def test_update_existing_without_prior_submission_creates_normally(db):
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+
+    ev = evaluate_article(contest, ARTICLE, submitter="Alice", submitter_id=alice.id)
+    created = create_submission(alice.id, contest, ev["hash"], update_existing=True)
+
+    assert created.id and Submission.query.count() == 1
+
+
+def test_update_existing_is_audit_logged(db):
+    import logging
+    from services.audit import review_audit
+
+    captured = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            captured.append(record.getMessage())
+
+    handler = _Capture()
+    review_audit.addHandler(handler)
+    try:
+        _creator, contest = active_contest(db)
+        alice = make_user(db, "Alice")
+        first = submit(contest, alice)
+        review_submission(first, _creator.id, "accept", score=7)
+        ev = evaluate_article(contest, ARTICLE, submitter="Alice", submitter_id=alice.id)
+        create_submission(alice.id, contest, ev["hash"], update_existing=True)
+    finally:
+        review_audit.removeHandler(handler)
+
+    line = next(m for m in captured if m.startswith("stats-update"))
+    assert f"submission={first.id}" in line
+    assert "review_removed=True" in line
+    assert "'accepted'" in line and "7" in line   # previous review preserved in log
+
+
+def test_same_user_different_article_still_allowed(db):
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    submit(contest, alice, "https://en.wikipedia.org/wiki/Cat")
+    submit(contest, alice, "https://en.wikipedia.org/wiki/Dog")
+    assert Submission.query.count() == 2
+
+
+def test_same_article_allowed_in_different_contests(db):
+    _creator, contest1 = active_contest(db, "C1")
+    _c2, contest2 = active_contest(db, "C2")
+    alice = make_user(db, "Alice")
+    bob = make_user(db, "Bob")
+    submit(contest1, alice)
+    submit(contest2, bob)
+    assert Submission.query.count() == 2

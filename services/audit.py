@@ -59,3 +59,17 @@ def log_review(submission, reviewer_id, decision, is_edit, previous=None):
         submission.review_comment or "",
         f" previous={previous}" if (is_edit and previous is not None) else "",
     )
+
+
+def log_stats_update(submission, previous=None):
+    """Append a participant-triggered stats refresh to the audit log. The
+    submitter re-evaluated an article they had already submitted and chose to
+    replace its stats; `previous` is the (status, score, parameter_scores,
+    reviewed_by) tuple of the jury review that was removed, or None if the
+    submission was still pending (nothing to remove)."""
+    review_audit.info(
+        "stats-update submission=%s contest=%s submitter=%s review_removed=%s%s",
+        submission.id, submission.contest_id, submission.user_id,
+        previous is not None,
+        f" previous={previous}" if previous is not None else "",
+    )

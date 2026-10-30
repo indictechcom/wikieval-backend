@@ -369,3 +369,109 @@ def test_review_requires_login(client, db):
     resp = client.post(f"/api/submissions/{s.id}/review", json={"decision": "accept"})
 
     assert resp.status_code == 401
+
+
+# --- one article per contest (any participant) ---
+
+def test_evaluate_blocks_article_submitted_by_another_participant(client, db, login_as):
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    make_user(db, "Bob")
+    _submit(contest, alice)
+    login_as(client, "Bob")
+
+    resp = client.post(f"/api/contests/{contest.id}/submissions/evaluate",
+                       json={"article_link": ARTICLE})
+
+    assert resp.status_code == 400
+    assert "another participant" in resp.get_json()["error"]
+
+
+def test_submit_blocks_article_submitted_by_another_participant(client, db, login_as):
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    make_user(db, "Bob")
+    login_as(client, "Bob")
+    h = _evaluate(client, contest.id)        # Bob evaluates first...
+    _submit(contest, alice)                  # ...Alice submits in the meantime
+
+    resp = client.post(f"/api/contests/{contest.id}/submissions", json={"hash": h})
+
+    assert resp.status_code == 400
+    assert "another participant" in resp.get_json()["error"]
+
+
+def test_evaluate_reports_own_existing_submission(client, db, login_as):
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    first = _submit(contest, alice)
+    login_as(client, "Alice")
+
+    resp = client.post(f"/api/contests/{contest.id}/submissions/evaluate",
+                       json={"article_link": ARTICLE})
+    body = resp.get_json()
+
+    assert resp.status_code == 200
+    assert body["existing_submission"]["id"] == first.id
+    assert body["existing_submission"]["already_reviewed"] is False
+
+
+def test_submit_without_update_flag_rejects_own_duplicate(client, db, login_as):
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    _submit(contest, alice)
+    login_as(client, "Alice")
+
+    h = _evaluate(client, contest.id)
+    resp = client.post(f"/api/contests/{contest.id}/submissions", json={"hash": h})
+
+    assert resp.status_code == 400
+    assert "already submitted" in resp.get_json()["error"]
+
+
+def test_submit_with_update_flag_refreshes_and_resets_review(client, db, login_as):
+    from services.submission import review_submission
+
+    creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    first = _submit(contest, alice)
+    review_submission(first, creator.id, "accept", score=7)
+    login_as(client, "Alice")
+
+    h = _evaluate(client, contest.id)
+    resp = client.post(f"/api/contests/{contest.id}/submissions",
+                       json={"hash": h, "update": True})
+    body = resp.get_json()
+
+    assert resp.status_code == 200          # updated, not created
+    assert body["id"] == first.id
+    assert body["status"] == "pending"
+    assert body["score"] == 0
+    assert body["already_reviewed"] is False
+    assert body["reviewed_by_username"] is None
+
+
+def test_import_blocks_article_submitted_by_another_participant(client, db, login_as):
+    _creator, contest = active_contest(db)
+    alice = make_user(db, "Alice")
+    _submit(contest, alice)
+    login_as(client, SUPERADMIN)
+
+    resp = client.post(IMPORT_URL.format(contest.id),
+                       json={"username": "Bob", "article_link": ARTICLE})
+
+    assert resp.status_code == 400
+    assert "another participant" in resp.get_json()["error"]
+
+
+def test_add_on_behalf_blocks_article_submitted_by_another_participant(client, db, login_as):
+    _creator, contest = active_contest(db, creator_name="Org")
+    alice = make_user(db, "Alice")
+    _submit(contest, alice)
+    login_as(client, "Org")
+
+    resp = client.post(ADD_URL.format(contest.id),
+                       json={"username": "Bob", "article_link": ARTICLE})
+
+    assert resp.status_code == 400
+    assert "another participant" in resp.get_json()["error"]

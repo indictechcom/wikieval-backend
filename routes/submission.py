@@ -39,7 +39,7 @@ def evaluate(contest_id):
     data = request.get_json(silent=True) or {}
     try:
         result = evaluate_article(contest, data.get('article_link'),
-                                  submitter=user.username)
+                                  submitter=user.username, submitter_id=user.id)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -59,12 +59,17 @@ def create(contest_id):
         return jsonify({"error": "Contest not found"}), 404
 
     data = request.get_json(silent=True) or {}
+    # `update: true` — the participant already submitted this article (the
+    # /evaluate response carried `existing_submission`) and chose to refresh its
+    # stats. The existing row is updated in place and its jury review removed.
+    update = bool(data.get('update'))
     try:
-        submission = create_submission(user.id, contest, data.get('hash'))
+        submission = create_submission(user.id, contest, data.get('hash'),
+                                       update_existing=update)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    return jsonify(submission.to_dict()), 201
+    return jsonify(submission.to_dict()), (200 if update else 201)
 
 
 @bp.route('/api/contests/<int:contest_id>/submissions/import', methods=['POST'])
