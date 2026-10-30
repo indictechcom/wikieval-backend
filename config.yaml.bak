@@ -8,3 +8,4 @@ SESSION_REFRESH_EACH_REQUEST: False
 PREFERRED_URL_SCHEME: https
 SQLALCHEMY_DATABASE_URI: mysql+pymysql://username:password@host.docker.internal/wikifile
 SQLALCHEMY_TRACK_MODIFICATIONS: False
+FRONTEND_URL: http://127.0.0.1:5173

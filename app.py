@@ -4,7 +4,7 @@ import logging
 import os
 
 import yaml
-from flask import Flask, jsonify, render_template, request, session
+from flask import Flask, jsonify,redirect, render_template, request, session
 from flask_cors import CORS
 from flask_migrate import Migrate
 from flask_mwoauth import MWOAuth
@@ -48,6 +48,7 @@ BASE_URL = app.config['OAUTH_MWURI']
 API_ENDPOINT = BASE_URL + '/api.php'
 CONSUMER_KEY = app.config['CONSUMER_KEY']
 CONSUMER_SECRET = app.config['CONSUMER_SECRET']
+FRONTEND_URL = app.config['FRONTEND_URL']
 
 # Enable CORS and Debugging in Dev mode
 if ENV == 'dev':
@@ -108,11 +109,12 @@ def sync_logged_in_user():
         logger.exception("Failed to sync logged-in user %s", username)
 
 
-@app.route('/index', methods=['GET'])
-@app.route("/")
+@app.route("/", endpoint="index")
 def index():
-    return render_template('index.html')
-
+    if app.config['ENV'] == 'dev':
+        return redirect(FRONTEND_URL or "http://127.0.0.1:5173")
+    else:
+        return render_template('index.html')
 
 @app.route('/<path:path>')
 def spa_fallback(path):
