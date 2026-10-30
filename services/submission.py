@@ -180,6 +180,50 @@ def import_submission(contest, username, article_link):
     return submission
 
 
+def add_submission_for(contest, username, article_link):
+    """Organizer/superadmin: add a submission on behalf of a participant who
+    missed submitting during the campaign. Unlike the normal flow this ignores
+    the closed submission window (so missed articles can be added after the end
+    date WITHOUT changing the contest dates), but it DOES enforce the contest's
+    eligibility rules — so an added article must still qualify. The words-added
+    contribution stays scoped to the contest window, so a late add only ever
+    credits in-window work."""
+    if not username or not username.strip():
+        raise ValueError("A submitter username is required")
+    if not article_link or not article_link.strip():
+        raise ValueError("An article link is required")
+
+    ensure_users([username.strip()])
+    submitter = User.query.filter_by(username=username.strip()).first()
+
+    link = _normalize_link(article_link)
+    existing = Submission.query.filter_by(
+        user_id=submitter.id, contest_id=contest.id, article_link=link
+    ).first()
+    if existing is not None:
+        raise ValueError("This participant has already submitted this article to this contest")
+
+    metadata = mediawiki.process_article(link, contest)
+    check_eligibility(contest, metadata, submitter=submitter.username)
+    metadata["submitter_contribution"] = _submitter_contribution(
+        contest, link, submitter.username)
+
+    submission = Submission(
+        user_id=submitter.id,
+        contest_id=contest.id,
+        article_link=link,
+        article_metadata=metadata,
+        status=SubmissionStatus.PENDING.value,
+    )
+    db.session.add(submission)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        raise ValueError("This participant has already submitted this article to this contest")
+    return submission
+
+
 def review_submission(submission, reviewer_id, decision, score=None,
                       review_comment=None, parameter_scores=None):
     # A pending submission can be reviewed by any jury member; an already-reviewed

@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify, request
 
 from services.contest import get_contest
 from services.submission import (
+    add_submission_for,
     create_submission,
     evaluate_article,
     get_submission,
@@ -83,6 +84,30 @@ def import_one(contest_id):
     data = request.get_json(silent=True) or {}
     try:
         submission = import_submission(
+            contest, data.get('username'), data.get('article_link'))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify(submission.to_dict()), 201
+
+
+@bp.route('/api/contests/<int:contest_id>/submissions/add', methods=['POST'])
+def add_on_behalf(contest_id):
+    """Organizer (or superadmin): add a single submission on behalf of a
+    participant who missed submitting during the campaign. Ignores the closed
+    window (dates unchanged) but enforces the contest's eligibility rules."""
+    user = current_user()
+    if user is None:
+        return jsonify({"error": "Login required"}), 401
+    contest = get_contest(contest_id)
+    if contest is None:
+        return jsonify({"error": "Contest not found"}), 404
+    if not (is_superadmin(user.username) or contest.is_organizer(user.username)):
+        return jsonify({"error": "Only a contest organizer can add submissions"}), 403
+
+    data = request.get_json(silent=True) or {}
+    try:
+        submission = add_submission_for(
             contest, data.get('username'), data.get('article_link'))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400

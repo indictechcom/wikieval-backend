@@ -152,6 +152,61 @@ def test_import_requires_username_and_link(client, db, login_as):
     assert r1.status_code == 400 and r2.status_code == 400
 
 
+ADD_URL = "/api/contests/{}/submissions/add"
+
+
+def test_add_on_behalf_requires_organizer(client, db, login_as):
+    _creator, contest = active_contest(db)
+    make_user(db, "Random")
+    login_as(client, "Random")  # not an organizer
+    resp = client.post(ADD_URL.format(contest.id),
+                       json={"username": "Bob", "article_link": ARTICLE})
+    assert resp.status_code == 403
+
+
+def test_organizer_adds_submission_on_behalf(client, db, login_as):
+    _creator, contest = active_contest(db, creator_name="Org")
+    login_as(client, "Org")  # the creator is an organizer
+    resp = client.post(ADD_URL.format(contest.id),
+                       json={"username": "Bob", "article_link": ARTICLE})
+    body = resp.get_json()
+    assert resp.status_code == 201, body
+    assert body["status"] == "pending" and body["username"] == "Bob"
+    assert body["article_metadata"]["article_title"] == "Cat"
+
+
+def test_add_on_behalf_enforces_eligibility(client, db, login_as):
+    # Contest requires more words than the stub article has -> rejected.
+    _creator, contest = active_contest(db, creator_name="Org",
+                                       eligibility_rules={"min_word_count": 100000})
+    login_as(client, "Org")
+    resp = client.post(ADD_URL.format(contest.id),
+                       json={"username": "Bob", "article_link": ARTICLE})
+    assert resp.status_code == 400
+    assert "words" in resp.get_json()["error"]
+
+
+def test_add_on_behalf_rejects_duplicate(client, db, login_as):
+    _creator, contest = active_contest(db, creator_name="Org")
+    login_as(client, "Org")
+    payload = {"username": "Bob", "article_link": ARTICLE}
+    assert client.post(ADD_URL.format(contest.id), json=payload).status_code == 201
+    assert client.post(ADD_URL.format(contest.id), json=payload).status_code == 400
+
+
+def test_add_on_behalf_works_after_window_closed(client, db, login_as):
+    # The whole point: add a missed article AFTER the campaign ended, without
+    # changing the dates. Normal submission would be blocked; this isn't.
+    _creator, contest = active_contest(db, creator_name="Org",
+                                       start_date="2020-01-01",
+                                       end_date="2020-02-01T00:00:00+00:00")
+    login_as(client, "Org")
+    resp = client.post(ADD_URL.format(contest.id),
+                       json={"username": "Bob", "article_link": ARTICLE})
+    assert resp.status_code == 201, resp.get_json()
+    assert resp.get_json()["status"] == "pending"
+
+
 def test_submit_requires_prior_evaluation(client, db, login_as):
     _creator, contest = active_contest(db)
     make_user(db, "Alice")
