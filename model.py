@@ -106,7 +106,7 @@ class ContestCreationRequest(db.Model):
             "reason": self.reason,
             "status": self.status,
             "reviewed_by": self.reviewed_by,
-            "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
+            "reviewed_at": _iso_utc(self.reviewed_at),
             "rejection_reason": self.rejection_reason,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
@@ -145,10 +145,29 @@ class Contest(db.Model):
     marks_setting_accepted = db.Column(db.Integer, nullable=False, default=0)
     marks_setting_rejected = db.Column(db.Integer, nullable=False, default=0)
     scoring_parameters = db.Column(db.JSON, nullable=True)
+    # How many jury reviews an article needs before its result is final.
+    # 1 (default, and every pre-existing contest) = a single jury member's
+    # review is final, as before. 2+ = each article collects that many
+    # independent reviews; the majority decision wins (a tie stays pending for
+    # one more reviewer) and the score is the average of the agreeing reviews.
+    reviews_required = db.Column(db.Integer, nullable=False, default=1,
+                                 server_default="1")
 
     jury_members = db.Column(db.JSON, nullable=True)
     organizers = db.Column(db.JSON, nullable=True)
     project_link = db.Column(db.Text, nullable=True)
+
+    # Campaign hierarchy (two levels). A *group* campaign is a parent that takes
+    # no submissions itself; it holds child campaigns (one per community,
+    # language or project) and shows their aggregated progress. A child is an
+    # ordinary contest with `parent_id` set. Contests with neither (the
+    # pre-existing ones) are standalone "individual" campaigns, so older rows
+    # need no backfill: is_group defaults to false and parent_id to NULL.
+    is_group = db.Column(db.Boolean, nullable=False, default=False,
+                         server_default=db.false())
+    parent_id = db.Column(db.Integer,
+                          db.ForeignKey('contests.id', ondelete='SET NULL'),
+                          nullable=True, index=True)
 
     # Metadata
     created_at = db.Column(
@@ -165,14 +184,42 @@ class Contest(db.Model):
     )
 
     creator = db.relationship('User', backref='contests_created')
+    parent = db.relationship('Contest', remote_side=[id], backref='children',
+                             foreign_keys=[parent_id])
 
     def rule(self, key, default=None):
         """Read an eligibility rule value (e.g. min_byte_count)."""
         return (self.eligibility_rules or {}).get(key, default)
 
     def is_organizer(self, username):
-        """Whether a username manages this contest (creator is always included)."""
-        return username is not None and username in (self.organizers or [])
+        """Whether a username manages this contest (creator is always included).
+        Organizers of a group campaign implicitly manage every child under it,
+        so a child's organizer can't lock the group's organizers out."""
+        if username is None:
+            return False
+        if username in (self.organizers or []):
+            return True
+        return self.parent is not None and self.parent.is_organizer(username)
+
+    def effective_organizers(self):
+        """Own organizers plus (for a child) the parent group's organizers."""
+        own = list(self.organizers or [])
+        if self.parent is not None:
+            own += [u for u in (self.parent.organizers or []) if u not in own]
+        return own
+
+    def children_window(self):
+        """(earliest start, latest end) across a group's children, or (None,
+        None). Lets the UI place a group in Current/Upcoming/Past by what its
+        children are actually doing rather than its own informational dates."""
+        if not self.is_group or not self.children:
+            return None, None
+        starts = [c.start_date for c in self.children if c.start_date]
+        ends = [c.end_date for c in self.children if c.end_date]
+        # Open-ended child (no end) → the group is open-ended too.
+        open_ended = any(c.end_date is None for c in self.children)
+        return (min(starts) if starts else None,
+                None if open_ended else (max(ends) if ends else None))
 
     def to_dict(self):
         """Serialize this contest for API responses."""
@@ -191,14 +238,29 @@ class Contest(db.Model):
             "marks_setting_accepted": self.marks_setting_accepted,
             "marks_setting_rejected": self.marks_setting_rejected,
             "scoring_parameters": self.scoring_parameters,
+            "reviews_required": self.reviews_required or 1,
             "jury_members": self.jury_members,
             "organizers": self.organizers,
             "project_link": self.project_link,
-            "submission_count": db.session.query(db.func.count(Submission.id))
-                                          .filter(Submission.contest_id == self.id)
-                                          .scalar(),
+            "is_group": bool(self.is_group),
+            "parent_id": self.parent_id,
+            "parent_name": self.parent.name if self.parent else None,
+            "child_count": len(self.children) if self.is_group else 0,
+            "effective_organizers": self.effective_organizers(),
+            "children_start_date": _iso_utc(self.children_window()[0]),
+            "children_end_date": _iso_utc(self.children_window()[1]),
+            # A group's count is the sum over its children (it has none itself).
+            "submission_count": self._submission_count(),
             "created_at": _iso_utc(self.created_at),
         }
+
+    def _submission_count(self):
+        count = db.session.query(db.func.count(Submission.id))
+        if self.is_group:
+            return count.filter(Submission.contest_id.in_(
+                db.session.query(Contest.id).filter(Contest.parent_id == self.id)
+            )).scalar()
+        return count.filter(Submission.contest_id == self.id).scalar()
 
     def __repr__(self):
         """String representation of Contest instance"""
@@ -228,7 +290,15 @@ class Submission(db.Model):
     # such as categories_added and template_added.
     article_metadata = db.Column(db.JSON, nullable=True)
 
-    # Status & scoring
+    # Every jury review of this submission, one entry per jury member:
+    #   {reviewer_id, reviewer_username, decision, score, parameter_scores,
+    #    review_comment, reviewed_at}
+    # The status/score/reviewed_* columns below are the AGGREGATE derived from
+    # these (services.submission._recompute_review): with the contest's
+    # reviews_required == 1 the aggregate simply mirrors the single entry.
+    reviews = db.Column(db.JSON, nullable=True)
+
+    # Status & scoring (aggregate of `reviews`)
     status = db.Column(db.String(20), nullable=False,
                        default=SubmissionStatus.PENDING.value, index=True)
     score = db.Column(db.Integer, nullable=False, default=0)
@@ -282,10 +352,17 @@ class Submission(db.Model):
             "score_breakdown": self.score_breakdown,
             "reviewed_by": self.reviewed_by,
             "reviewed_by_username": self.reviewer.username if self.reviewer else None,
-            "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
+            "reviewed_at": _iso_utc(self.reviewed_at),
             "review_comment": self.review_comment,
+            # Final (enough reviews, no tie). Pending-with-some-reviews shows as
+            # already_reviewed=false with review_count > 0.
             "already_reviewed": self.reviewed_at is not None,
-            "submitted_at": self.submitted_at.isoformat() if self.submitted_at else None,
+            "reviews": list(self.reviews or []),
+            "review_count": len(self.reviews or []),
+            "reviews_required": (self.contest.reviews_required or 1) if self.contest else 1,
+            # _iso_utc: DB backends hand back naive instants; serialize with an
+            # explicit UTC offset so the browser doesn't read them as local time.
+            "submitted_at": _iso_utc(self.submitted_at),
         }
 
     def __repr__(self):

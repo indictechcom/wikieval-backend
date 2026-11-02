@@ -14,7 +14,7 @@ class ContestLocked(Exception):
 _SETTABLE_FIELDS = (
     "description", "start_date", "end_date", "timezone", "eligibility_rules",
     "marks_setting_accepted", "marks_setting_rejected",
-    "scoring_parameters",
+    "scoring_parameters", "reviews_required",
     "jury_members", "organizers", "project_link",
 )
 _DATE_FIELDS = ("start_date", "end_date")
@@ -65,6 +65,14 @@ def _validate_timezone(name):
         raise ValueError(f"Unknown timezone: {name}")
 
 
+def _validate_reviews_required(fields):
+    value = fields.get("reviews_required")
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("reviews_required must be a whole number of at least 1")
+
+
 def _validate_marks(fields):
     accepted = fields.get("marks_setting_accepted")
     if accepted is not None and (not isinstance(accepted, (int, float)) or accepted <= 0):
@@ -73,6 +81,24 @@ def _validate_marks(fields):
     rejected = fields.get("marks_setting_rejected")
     if rejected is not None and (not isinstance(rejected, (int, float)) or rejected > 0):
         raise ValueError("marks_setting_rejected must be zero or negative")
+
+
+def _resolve_parent(parent_id, child=None):
+    """Validate a parent_id for a child campaign and return the parent Contest
+    (or None when detaching). Hierarchy is strictly two levels: the parent must
+    be a group campaign, and a group campaign can never itself be a child."""
+    if parent_id is None:
+        return None
+    if child is not None and child.is_group:
+        raise ValueError("A group campaign cannot be attached under another campaign")
+    parent = db.session.get(Contest, parent_id)
+    if parent is None:
+        raise ValueError("Parent campaign not found")
+    if not parent.is_group:
+        raise ValueError("Parent must be a group campaign")
+    if child is not None and parent.id == child.id:
+        raise ValueError("A campaign cannot be its own parent")
+    return parent
 
 
 def _validate_date_order(start, end):
@@ -139,11 +165,19 @@ def get_leaderboard(contest):
     ]
 
 
-def create_contest(user_id, name, project_name, **fields):
+def create_contest(user_id, name, project_name, is_group=False, parent_id=None,
+                   **fields):
+    """Create a contest. `is_group=True` makes a group (parent) campaign, which
+    takes no submissions and whose settings serve as defaults for its children.
+    `parent_id` makes this a child of that group campaign. Both at once is an
+    error (the hierarchy is two levels). Neither → a standalone campaign."""
     if not name or not name.strip():
         raise ValueError("Contest name is required")
     if not project_name or not project_name.strip():
         raise ValueError("Project name is required")
+    if is_group and parent_id is not None:
+        raise ValueError("A group campaign cannot itself be a child campaign")
+    parent = _resolve_parent(parent_id)
 
     fields = _coerce_dates(fields)
     if not fields.get("start_date"):
@@ -151,13 +185,19 @@ def create_contest(user_id, name, project_name, **fields):
     if fields.get("marks_setting_accepted") is None:
         raise ValueError("marks_setting_accepted is required")
     _validate_marks(fields)
+    _validate_reviews_required(fields)
     _validate_date_order(fields.get("start_date"), fields.get("end_date"))
 
+    # A group campaign has no draft/start lifecycle: it takes no submissions,
+    # its settings are only defaults for its children, and its children need
+    # it to be visible. So it is active (listed, never locked) from creation.
     contest = Contest(
         name=name.strip(),
         project_name=project_name.strip(),
         created_by=user_id,
-        status=ContestStatus.PENDING.value,
+        status=(ContestStatus.ACTIVE if is_group else ContestStatus.PENDING).value,
+        is_group=bool(is_group),
+        parent_id=parent.id if parent else None,
     )
     for key in _SETTABLE_FIELDS:
         if fields.get(key) is not None:
@@ -186,17 +226,26 @@ def _with_creator(organizers, creator):
 # end_date is included so a running contest can be extended (or closed early);
 # the contest's timezone is not, so the deadline instant stays interpreted in the
 # zone it was created with.
-_EDITABLE_WHEN_LOCKED = {"organizers", "jury_members", "end_date"}
+# parent_id too: an existing (possibly running) contest can be attached to or
+# detached from a group campaign at any time.
+_EDITABLE_WHEN_LOCKED = {"organizers", "jury_members", "end_date", "parent_id"}
 
 
 def update_contest(contest, **fields):
-    if contest.status != ContestStatus.PENDING.value and set(fields) - _EDITABLE_WHEN_LOCKED:
+    locked = contest.status != ContestStatus.PENDING.value and not contest.is_group
+    if locked and set(fields) - _EDITABLE_WHEN_LOCKED:
         raise ContestLocked(
-            "Contest is locked; only organizers, jury members and the end date "
-            "can be edited"
+            "Contest is locked; only organizers, jury members, the end date "
+            "and the parent campaign can be edited"
         )
 
     fields = _coerce_dates(fields)
+
+    # Attach to / detach from a group campaign (None detaches). is_group itself
+    # is fixed at creation.
+    if "parent_id" in fields:
+        parent = _resolve_parent(fields.pop("parent_id"), child=contest)
+        contest.parent_id = parent.id if parent else None
 
     if "name" in fields:
         if not fields["name"] or not str(fields["name"]).strip():
@@ -209,6 +258,7 @@ def update_contest(contest, **fields):
     if "start_date" in fields and not fields["start_date"]:
         raise ValueError("Start date is required")
     _validate_marks(fields)
+    _validate_reviews_required(fields)
     # Compare the effective window: a locked contest can update only end_date,
     # so check the new end against the contest's existing start.
     _validate_date_order(
@@ -233,9 +283,54 @@ def update_contest(contest, **fields):
 
 
 def start_contest(contest):
+    if contest.is_group:
+        raise ContestLocked("A group campaign is active from creation and is not started")
     if contest.status != ContestStatus.PENDING.value:
         raise ContestLocked("Contest has already been started")
 
     contest.status = ContestStatus.ACTIVE.value
     db.session.commit()
     return contest
+
+
+def list_children(parent, viewer=None, is_superadmin=False):
+    """A group campaign's children with per-child submission aggregates. Draft
+    (pending) children are visible only to superadmins and to organizers of the
+    parent or of that child — the same idea as list_contests' visibility."""
+    children = sorted(parent.children, key=lambda c: (c.created_at, c.id))
+    username = viewer.username if viewer else None
+    if not is_superadmin and not parent.is_organizer(username):
+        children = [c for c in children
+                    if c.status == ContestStatus.ACTIVE.value or c.is_organizer(username)]
+    if not children:
+        return []
+
+    def _count(status):
+        return func.sum(case((Submission.status == status, 1), else_=0))
+
+    rows = (
+        db.session.query(
+            Submission.contest_id,
+            func.count(Submission.id),
+            _count(SubmissionStatus.ACCEPTED.value),
+            _count(SubmissionStatus.REJECTED.value),
+            _count(SubmissionStatus.PENDING.value),
+            func.count(func.distinct(Submission.user_id)),
+        )
+        .filter(Submission.contest_id.in_([c.id for c in children]))
+        .group_by(Submission.contest_id)
+        .all()
+    )
+    stats = {cid: (int(t), int(a), int(r), int(p), int(u)) for cid, t, a, r, p, u in rows}
+    out = []
+    for c in children:
+        total, accepted, rejected, pending, participants = stats.get(c.id, (0, 0, 0, 0, 0))
+        out.append({
+            **c.to_dict(),
+            "submission_count": total,
+            "accepted_count": accepted,
+            "rejected_count": rejected,
+            "pending_count": pending,
+            "participant_count": participants,
+        })
+    return out

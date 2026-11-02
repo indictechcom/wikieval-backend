@@ -1,3 +1,4 @@
+import math
 import urllib.parse
 from datetime import datetime, timezone
 
@@ -86,12 +87,21 @@ def _existing_summary(submission):
     }
 
 
+def _reject_group(contest):
+    """A group (parent) campaign only aggregates its children; articles are
+    submitted to a child campaign."""
+    if contest.is_group:
+        raise ValueError("This is a group campaign; submit your article to one "
+                         "of its child campaigns instead")
+
+
 def evaluate_article(contest, article_link, submitter=None, submitter_id=None):
     """Step 1 of the submit flow. Besides the eligibility checks this enforces
     one-article-one-participant: if another participant already submitted the
     link, evaluation fails. If `submitter_id` already submitted it, the result
     carries `existing_submission` so the client can offer to keep the existing
     entry or refresh its stats (see create_submission(update_existing=True))."""
+    _reject_group(contest)
     if contest.status != ContestStatus.ACTIVE.value:
         raise ValueError("Contest is not open for submissions")
     if _submissions_closed(contest):
@@ -164,6 +174,7 @@ def _reset_review(submission):
     submission.reviewed_by = None
     submission.reviewed_at = None
     submission.review_comment = None
+    submission.reviews = None
     return previous
 
 
@@ -174,6 +185,7 @@ def create_submission(user_id, contest, token, update_existing=False):
     the participant the ignore-or-update choice); with update_existing=True the
     existing row's article stats are replaced by the fresh evaluation and any
     jury review is removed, so the article is reviewed again from scratch."""
+    _reject_group(contest)
     data = _load_evaluation(token, contest)
 
     if contest.status != ContestStatus.ACTIVE.value:
@@ -219,6 +231,7 @@ def import_submission(contest, username, article_link):
     `pending` (reviews are re-done), and re-fetches the article's metadata so the
     imported submission is fully functional. One article per call keeps each
     request fast (no bulk timeout)."""
+    _reject_group(contest)
     if not username or not username.strip():
         raise ValueError("A submitter username is required")
     if not article_link or not article_link.strip():
@@ -266,6 +279,7 @@ def add_submission_for(contest, username, article_link):
     eligibility rules — so an added article must still qualify. The words-added
     contribution stays scoped to the contest window, so a late add only ever
     credits in-window work."""
+    _reject_group(contest)
     if not username or not username.strip():
         raise ValueError("A submitter username is required")
     if not article_link or not article_link.strip():
@@ -302,36 +316,114 @@ def add_submission_for(contest, username, article_link):
     return submission
 
 
+def _is_final(reviews, required):
+    """Enough reviews and a clear majority (a tie needs one more reviewer)."""
+    accepts = sum(1 for r in reviews if r["decision"] == "accept")
+    rejects = len(reviews) - accepts
+    return len(reviews) >= required and accepts != rejects
+
+
+def _average(values):
+    nums = [v for v in values if isinstance(v, (int, float))]
+    if not nums:
+        return None
+    avg = sum(nums) / len(nums)
+    return int(avg) if float(avg).is_integer() else round(avg, 2)
+
+
+def _recompute_review(submission, contest):
+    """Derive the submission's aggregate review columns from its `reviews`
+    list. With reviews_required == 1 (every pre-existing contest) a single
+    review makes the result final and the aggregate mirrors it exactly, so
+    behaviour is unchanged. With more, the majority decision wins and the
+    score (and each parameter score) is the average over the reviews that
+    agree with it; until then the submission stays pending with score 0."""
+    reviews = list(submission.reviews or [])
+    required = contest.reviews_required or 1
+    latest = max(reviews, key=lambda r: r["reviewed_at"]) if reviews else None
+
+    submission.reviewed_by = latest["reviewer_id"] if latest else None
+    submission.review_comment = latest.get("review_comment") if latest else None
+
+    if not reviews or not _is_final(reviews, required):
+        submission.status = SubmissionStatus.PENDING.value
+        submission.score = 0
+        submission.parameter_scores = None
+        submission.reviewed_at = None
+        return
+
+    accepts = [r for r in reviews if r["decision"] == "accept"]
+    rejects = [r for r in reviews if r["decision"] != "accept"]
+    accepted = len(accepts) > len(rejects)
+    winners = accepts if accepted else rejects
+    submission.status = (SubmissionStatus.ACCEPTED if accepted
+                         else SubmissionStatus.REJECTED).value
+    # Half-up rounding (6.5 → 7), not Python's round-half-to-even.
+    submission.score = int(math.floor((_average(r.get("score") for r in winners) or 0) + 0.5))
+
+    keys = []
+    for r in winners:
+        for k in (r.get("parameter_scores") or {}):
+            if k not in keys:
+                keys.append(k)
+    submission.parameter_scores = {
+        k: _average((r.get("parameter_scores") or {}).get(k) for r in winners)
+        for k in keys
+    } if keys else None
+    submission.reviewed_at = datetime.fromisoformat(latest["reviewed_at"])
+
+
 def review_submission(submission, reviewer_id, decision, score=None,
                       review_comment=None, parameter_scores=None):
-    # A pending submission can be reviewed by any jury member; an already-reviewed
-    # one may be edited only by the jury member who reviewed it (not overridden
-    # by a different jury member).
-    already_reviewed = submission.status != SubmissionStatus.PENDING.value
-    if (already_reviewed and submission.reviewed_by is not None
-            and submission.reviewed_by != reviewer_id):
-        raise ValueError("This submission was already reviewed by another jury member")
+    """Record (or edit) one jury member's review and recompute the result.
 
-    # Capture the pre-edit state for the audit trail (an edit overwrites it) —
-    # includes parameter_scores so multi-parameter reviews keep their breakdown.
-    previous = ((submission.status, submission.score,
-                 submission.parameter_scores, submission.reviewed_by)
-                if already_reviewed else None)
-
-    contest = submission.contest
-    if decision == "accept":
-        submission.status = SubmissionStatus.ACCEPTED.value
-        submission.score = score if score is not None else (contest.marks_setting_accepted or 0)
-    elif decision == "reject":
-        submission.status = SubmissionStatus.REJECTED.value
-        submission.score = contest.marks_setting_rejected or 0
-    else:
+    A jury member always edits their own earlier review rather than adding a
+    second one. Other jury members may add reviews until the submission has
+    the contest's required number with a clear majority (reviews_required == 1
+    keeps today's rule: the first review is final and only its author can
+    change it)."""
+    if decision not in ("accept", "reject"):
         raise ValueError("decision must be 'accept' or 'reject'")
 
-    submission.parameter_scores = parameter_scores
-    submission.review_comment = review_comment
-    submission.reviewed_by = reviewer_id
-    submission.reviewed_at = datetime.now(timezone.utc)
+    contest = submission.contest
+    required = contest.reviews_required or 1
+    reviews = list(submission.reviews or [])
+    mine = next((r for r in reviews if r["reviewer_id"] == reviewer_id), None)
+    if mine is None and _is_final(reviews, required):
+        if required == 1:
+            raise ValueError("This submission was already reviewed by another jury member")
+        raise ValueError(
+            f"This submission already has its {required} required reviews")
+
+    # Pre-change aggregate for the audit trail (includes parameter_scores so
+    # multi-parameter reviews keep their breakdown).
+    already_final = submission.reviewed_at is not None
+    previous = ((submission.status, submission.score,
+                 submission.parameter_scores, submission.reviewed_by)
+                if already_final else None)
+
+    reviewer = db.session.get(User, reviewer_id)
+    if decision == "accept":
+        final_score = score if score is not None else (contest.marks_setting_accepted or 0)
+    else:
+        final_score = contest.marks_setting_rejected or 0
+    entry = {
+        "reviewer_id": reviewer_id,
+        "reviewer_username": reviewer.username if reviewer else None,
+        "decision": decision,
+        "score": final_score,
+        "parameter_scores": parameter_scores if decision == "accept" else None,
+        "review_comment": review_comment,
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if mine is not None:
+        reviews[reviews.index(mine)] = entry
+    else:
+        reviews.append(entry)
+    submission.reviews = reviews
+
+    _recompute_review(submission, contest)
     db.session.commit()
-    log_review(submission, reviewer_id, decision, is_edit=already_reviewed, previous=previous)
+    log_review(submission, reviewer_id, decision, is_edit=mine is not None,
+               previous=previous)
     return submission

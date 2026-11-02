@@ -299,6 +299,45 @@ username**. Requires login. One row per user who submitted.
 | `401` | not logged in | `{ "error": "Login required" }` |
 | `404` | no such contest | `{ "error": "Contest not found" }` |
 
+## Campaign hierarchy (group / child / individual)
+
+Every contest object carries `is_group` (bool), `parent_id` (int|null),
+`parent_name` (string|null) and `child_count`. Pre-existing contests are
+standalone *individual* campaigns (`is_group: false`, `parent_id: null`).
+
+- A **group** campaign (`is_group: true`) is a parent: it takes **no
+  submissions** (every submission endpoint returns `400`), and its
+  `submission_count` is the sum over its children. Its own rules, scoring,
+  jury and organizers serve as the defaults the client pre-fills when creating
+  a child. A group is **`active` from creation** (listed, never locked; `/start`
+  returns `409`), since it has no submission window of its own.
+- A **child** campaign is an ordinary contest with `parent_id` set; it keeps
+  its own details, submissions, reviews and leaderboard. **Organizers of the
+  parent implicitly organize every child** (edit, start, see all submissions,
+  add on behalf), so a child's organizer can't lock the group out;
+  `effective_organizers` lists own + parent organizers, while `organizers` stays
+  the child's own editable list.
+- `children_start_date` / `children_end_date` on a group are the earliest child
+  start and latest child end (`null` end if any child is open-ended), so the
+  client can bucket a group by what its children are doing; the group's own
+  dates are informational.
+- The hierarchy is two levels: a parent must be a group, and a group can never
+  be a child.
+- Attach, detach and create-child actions are written to the review audit log
+  (`hierarchy contest=… action=… actor=… parent=… previous_parent=…`).
+
+## GET `/api/contests/<id>/children`
+
+A group campaign's child campaigns, oldest first, each as a contest object
+plus per-child aggregates. Public; draft (`pending`) children are shown only to
+superadmins and organizers of the parent or of that child.
+
+| Status | When | Body |
+|--------|------|------|
+| `200` | ok | `{ "children": [ { <contest object>, "submission_count", "accepted_count", "rejected_count", "pending_count", "participant_count" }, ... ] }` |
+| `400` | not a group campaign | `{ "error": "Not a group campaign" }` |
+| `404` | no such contest | `{ "error": "Contest not found" }` |
+
 ## POST `/api/contests`
 
 Create a contest. Requires login **and** `can_create_contest`.
@@ -338,6 +377,11 @@ try-again error rather than accepting an unverifiable article.
 | `401` | not logged in | `{ "error": "Login required" }` |
 | `403` | lacks contest-creation rights | `{ "error": "You do not have contest-creation rights" }` |
 
+`is_group: true` creates a group campaign. `parent_id: <id>` creates a child
+of that group campaign; this needs the caller to be an organizer of the parent
+(else `403`), and such an organizer may create children **without** holding the
+global contest-creation right. Both together is `400`.
+
 ## PUT `/api/contests/<id>`
 
 Edit a contest. **Organizers only** (the creator is always an organizer). While
@@ -353,6 +397,13 @@ any subset of the contest fields.
 | `403` | not an organizer | `{ "error": "Only a contest organizer can edit it" }` |
 | `404` | no such contest | `{ "error": "Contest not found" }` |
 | `409` | active contest, non-editable field | `{ "error": "Contest is locked; only organizers and jury members can be edited" }` |
+
+`parent_id` attaches the contest to a group campaign (or `null` detaches it)
+and stays editable after the contest has started. Attaching requires being an
+organizer of **both** the contest and the target group (`403` otherwise).
+Detaching requires an organizer of the **current parent** group (a child's own
+organizer cannot leave a group on their own). `is_group` cannot be changed
+after creation (ignored).
 
 ## POST `/api/contests/<id>/start`
 
@@ -516,6 +567,29 @@ everyone else sees only their own. The response also includes the contest's
 | `401` | not logged in | `{ "error": "Login required" }` |
 | `404` | no such contest | `{ "error": "Contest not found" }` |
 
+## Multiple jury reviews per article
+
+A contest's `reviews_required` (integer ≥ 1, default **1**) sets how many
+jury reviews an article needs before its result is final. Every pre-existing
+contest has 1, which keeps the original rule: the first review is final and only
+its author may edit it.
+
+With 2 or more, each jury member adds their own review (and may edit it later).
+Until the required number is reached the submission stays `pending` with
+`score` 0 (`already_reviewed: false`, `review_count` > 0). Once reached, the
+**majority decision** wins; a **tie** keeps it pending for one more reviewer.
+The final `score` is the **average** of the reviews that agree with the
+decision (rounded to a whole number; `parameter_scores` are averaged per
+parameter, to 2 decimals). Further jury members are blocked once the result
+is final.
+
+Submission objects carry `reviews` (one entry per jury member: `reviewer_id`,
+`reviewer_username`, `decision`, `score`, `parameter_scores`,
+`review_comment`, `reviewed_at`), `review_count` and `reviews_required`. The
+aggregate fields (`status`, `score`, `parameter_scores`, `reviewed_by*`,
+`reviewed_at`, `review_comment` = latest review's comment) are derived from
+`reviews`.
+
 ## POST `/api/submissions/<id>/review`
 
 Accept or reject a submission. **Jury members only** — the users listed in the
@@ -534,7 +608,7 @@ contest's `jury_members`. The contest creator and superadmins **cannot** review
 | Status | When | Body |
 |--------|------|------|
 | `200` | reviewed | submission object |
-| `400` | invalid `decision`, or already reviewed | `{ "error": "<message>" }` |
+| `400` | invalid `decision`, or the submission already has its required review(s) from other jury members | `{ "error": "<message>" }` |
 | `401` | not logged in | `{ "error": "Login required" }` |
 | `403` | not a jury member | `{ "error": "Only a contest jury member can review submissions" }` |
 | `404` | no such submission | `{ "error": "Submission not found" }` |

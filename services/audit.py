@@ -73,3 +73,13 @@ def log_stats_update(submission, previous=None):
         previous is not None,
         f" previous={previous}" if previous is not None else "",
     )
+
+
+def log_hierarchy(contest, actor_id, action, parent_id=None, previous_parent_id=None):
+    """Append a campaign-hierarchy change (attach / detach / create-child) to
+    the audit log. There are no notifications, so this is the only record of
+    who moved a contest in or out of a group campaign."""
+    review_audit.info(
+        "hierarchy contest=%s action=%s actor=%s parent=%s previous_parent=%s",
+        contest.id, action, actor_id, parent_id, previous_parent_id,
+    )

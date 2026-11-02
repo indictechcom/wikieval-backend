@@ -311,3 +311,186 @@ def test_start_twice_raises(db):
 
     with pytest.raises(ContestLocked, match="already been started"):
         start_contest(c)
+
+
+# --- campaign hierarchy (group / child / individual) ---
+
+def _contest(db, user, name="C", **fields):
+    fields.setdefault("start_date", "2026-01-01")
+    fields.setdefault("marks_setting_accepted", 10)
+    return create_contest(user.id, name, "commons", **fields)
+
+
+def test_default_contest_is_individual(db):
+    user = make_user(db)
+    c = _contest(db, user)
+    d = c.to_dict()
+    assert c.is_group is False and c.parent_id is None
+    assert d["is_group"] is False and d["parent_id"] is None
+    assert d["parent_name"] is None and d["child_count"] == 0
+
+
+def test_create_group_and_child(db):
+    user = make_user(db)
+    group = _contest(db, user, "Group", is_group=True)
+    child = _contest(db, user, "Child", parent_id=group.id)
+
+    assert group.is_group and child.parent_id == group.id
+    assert child.to_dict()["parent_name"] == "Group"
+    assert group.to_dict()["child_count"] == 1
+    assert [c.id for c in group.children] == [child.id]
+
+
+def test_parent_must_be_group(db):
+    user = make_user(db)
+    plain = _contest(db, user, "Plain")
+    with pytest.raises(ValueError, match="must be a group"):
+        _contest(db, user, "Child", parent_id=plain.id)
+
+
+def test_parent_must_exist(db):
+    user = make_user(db)
+    with pytest.raises(ValueError, match="not found"):
+        _contest(db, user, "Child", parent_id=9999)
+
+
+def test_group_cannot_be_child(db):
+    user = make_user(db)
+    group = _contest(db, user, "Group", is_group=True)
+    with pytest.raises(ValueError, match="cannot itself be a child"):
+        _contest(db, user, "G2", is_group=True, parent_id=group.id)
+    g2 = _contest(db, user, "G2", is_group=True)
+    with pytest.raises(ValueError, match="cannot be attached"):
+        update_contest(g2, parent_id=group.id)
+
+
+def test_attach_and_detach_existing_contest(db):
+    user = make_user(db)
+    group = _contest(db, user, "Group", is_group=True)
+    plain = _contest(db, user, "Plain")
+    start_contest(plain)                      # locked, but parent_id stays editable
+
+    update_contest(plain, parent_id=group.id)
+    assert plain.parent_id == group.id
+
+    update_contest(plain, parent_id=None)
+    assert plain.parent_id is None
+
+
+def test_group_submission_count_sums_children(db):
+    from services.submission import create_submission, evaluate_article
+    user = make_user(db)
+    group = _contest(db, user, "Group", is_group=True)
+    a = _contest(db, user, "A", parent_id=group.id)
+    b = _contest(db, user, "B", parent_id=group.id)
+    start_contest(a); start_contest(b)
+    for contest, link in ((a, "https://en.wikipedia.org/wiki/X"),
+                          (a, "https://en.wikipedia.org/wiki/Y"),
+                          (b, "https://en.wikipedia.org/wiki/Z")):
+        create_submission(user.id, contest, evaluate_article(contest, link)["hash"])
+
+    assert group.to_dict()["submission_count"] == 3
+
+
+def test_list_children_aggregates_and_visibility(db):
+    from services.contest import list_children
+    from services.submission import create_submission, evaluate_article, review_submission
+    org = make_user(db, "Org")
+    other = make_user(db, "Other")
+    group = _contest(db, org, "Group", is_group=True)
+    live = _contest(db, org, "Live", parent_id=group.id)
+    draft = _contest(db, org, "Draft", parent_id=group.id)     # pending
+    start_contest(live)
+    s1 = create_submission(other.id, live, evaluate_article(live, "https://en.wikipedia.org/wiki/X")["hash"])
+    create_submission(other.id, live, evaluate_article(live, "https://en.wikipedia.org/wiki/Y")["hash"])
+    review_submission(s1, org.id, "accept")
+
+    rows = list_children(group, viewer=org)
+    assert [r["name"] for r in rows] == ["Live", "Draft"]      # organizer sees draft
+    assert rows[0]["submission_count"] == 2
+    assert rows[0]["accepted_count"] == 1 and rows[0]["pending_count"] == 1
+    assert rows[0]["rejected_count"] == 0 and rows[0]["participant_count"] == 1
+    assert rows[1]["submission_count"] == 0
+
+    assert [r["name"] for r in list_children(group, viewer=other)] == ["Live"]
+    assert [r["name"] for r in list_children(group, viewer=None)] == ["Live"]
+    assert len(list_children(group, viewer=None, is_superadmin=True)) == 2
+
+
+def test_group_campaign_rejects_submissions(db):
+    from services.submission import add_submission_for, evaluate_article, import_submission
+    user = make_user(db)
+    group = _contest(db, user, "Group", is_group=True)   # active from creation
+    for call in (
+        lambda: evaluate_article(group, "https://en.wikipedia.org/wiki/X"),
+        lambda: import_submission(group, "Bob", "https://en.wikipedia.org/wiki/X"),
+        lambda: add_submission_for(group, "Bob", "https://en.wikipedia.org/wiki/X"),
+    ):
+        with pytest.raises(ValueError, match="group campaign"):
+            call()
+
+
+# --- hierarchy hardening ---
+
+def test_group_is_active_from_creation_and_never_locked(db):
+    user = make_user(db)
+    group = _contest(db, user, "Group", is_group=True)
+    assert group.status == ContestStatus.ACTIVE.value
+    assert group.id in [c.id for c in list_contests()]      # publicly listed
+
+    update_contest(group, description="new defaults", marks_setting_accepted=5)
+    assert group.description == "new defaults"               # no lock
+
+    with pytest.raises(ContestLocked):
+        start_contest(group)
+
+
+def test_parent_organizers_implicitly_manage_children(db):
+    org = make_user(db, "Org")
+    other = make_user(db, "Other")
+    group = _contest(db, org, "Group", is_group=True)
+    child = _contest(db, other, "Child", parent_id=group.id)   # organizers: [Other]
+
+    assert child.is_organizer("Org") is True
+    assert child.is_organizer("Nobody") is False
+    assert child.to_dict()["effective_organizers"] == ["Other", "Org"]
+    assert child.to_dict()["organizers"] == ["Other"]        # own list untouched
+
+    update_contest(child, parent_id=None)
+    assert child.is_organizer("Org") is False                # no longer a child
+
+
+def test_children_window(db):
+    user = make_user(db)
+    group = _contest(db, user, "Group", is_group=True,
+                     start_date="2020-01-01", end_date="2020-02-01")
+    assert group.to_dict()["children_start_date"] is None
+
+    _contest(db, user, "A", parent_id=group.id, start_date="2026-03-01", end_date="2026-03-31")
+    _contest(db, user, "B", parent_id=group.id, start_date="2026-02-01", end_date="2026-04-30")
+    d = group.to_dict()
+    assert d["children_start_date"].startswith("2026-02-01")
+    assert d["children_end_date"].startswith("2026-04-30")
+
+    _contest(db, user, "C", parent_id=group.id, start_date="2026-05-01")   # open-ended
+    assert group.to_dict()["children_end_date"] is None
+
+
+# --- gaps: reviews_required lifecycle, effective organizers ---
+
+def test_reviews_required_editable_while_pending_locked_after_start(db):
+    user = make_user(db)
+    c = _contest(db, user)
+    update_contest(c, reviews_required=3)
+    assert c.reviews_required == 3
+
+    start_contest(c)
+    with pytest.raises(ContestLocked):
+        update_contest(c, reviews_required=1)
+
+
+def test_standalone_effective_organizers_is_own_list(db):
+    user = make_user(db)
+    c = _contest(db, user, organizers=["Helper"])
+    assert c.effective_organizers() == ["Creator", "Helper"]
+    assert c.to_dict()["effective_organizers"] == c.to_dict()["organizers"]

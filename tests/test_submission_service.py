@@ -650,3 +650,169 @@ def test_same_article_allowed_in_different_contests(db):
     submit(contest1, alice)
     submit(contest2, bob)
     assert Submission.query.count() == 2
+
+
+# --- multiple jury reviews per article (contest.reviews_required > 1) ---
+
+def _multi_contest(db, required=2, **fields):
+    return active_contest(db, reviews_required=required, marks_setting_accepted=10, **fields)
+
+
+def test_default_contest_requires_one_review(db):
+    _creator, contest = active_contest(db)
+    assert contest.reviews_required == 1
+    assert contest.to_dict()["reviews_required"] == 1
+
+
+def test_reviews_required_validation(db):
+    user = make_user(db, "U", can_create=True)
+    from services.contest import create_contest
+    for bad in (0, -1, 1.5, "2", True):
+        with pytest.raises(ValueError, match="reviews_required"):
+            create_contest(user.id, "C", "commons", start_date="2026-01-01",
+                           marks_setting_accepted=10, reviews_required=bad)
+
+
+def test_single_review_contest_mirrors_entry(db):
+    _creator, contest = active_contest(db)
+    s = submit(contest, make_user(db, "Sub"))
+    review_submission(s, _creator.id, "accept", score=7, review_comment="ok")
+    d = s.to_dict()
+    assert d["review_count"] == 1 and d["already_reviewed"] is True
+    assert d["reviews"][0]["reviewer_username"] == "Creator"
+    assert d["reviews"][0]["decision"] == "accept" and d["reviews"][0]["score"] == 7
+    assert s.status == "accepted" and s.score == 7
+
+
+def test_first_of_two_reviews_keeps_pending(db):
+    creator, contest = _multi_contest(db)
+    s = submit(contest, make_user(db, "Sub"))
+    review_submission(s, creator.id, "accept", score=8)
+
+    assert s.status == SubmissionStatus.PENDING.value
+    assert s.score == 0 and s.reviewed_at is None
+    d = s.to_dict()
+    assert d["review_count"] == 1 and d["already_reviewed"] is False
+
+
+def test_two_accepts_average_the_score(db):
+    creator, contest = _multi_contest(db)
+    j2 = make_user(db, "J2")
+    s = submit(contest, make_user(db, "Sub"))
+    review_submission(s, creator.id, "accept", score=8)
+    review_submission(s, j2.id, "accept", score=5)
+
+    assert s.status == "accepted"
+    assert s.score == 7            # 6.5 rounds half-up
+    assert s.reviewed_at is not None
+    assert s.to_dict()["already_reviewed"] is True
+
+
+def test_average_rounding(db):
+    creator, contest = _multi_contest(db, required=3)
+    j2, j3 = make_user(db, "J2"), make_user(db, "J3")
+    s = submit(contest, make_user(db, "Sub"))
+    review_submission(s, creator.id, "accept", score=10)
+    review_submission(s, j2.id, "accept", score=9)
+    review_submission(s, j3.id, "accept", score=9)
+    assert s.score == 9           # 28/3 = 9.33
+
+
+def test_tie_stays_pending_until_a_third_review(db):
+    creator, contest = _multi_contest(db)
+    j2, j3 = make_user(db, "J2"), make_user(db, "J3")
+    s = submit(contest, make_user(db, "Sub"))
+    review_submission(s, creator.id, "accept", score=8)
+    review_submission(s, j2.id, "reject")
+    assert s.status == SubmissionStatus.PENDING.value and s.score == 0
+
+    review_submission(s, j3.id, "accept", score=6)      # breaks the tie
+    assert s.status == "accepted"
+    assert s.score == 7                                  # avg of the two accepts only
+
+
+def test_reject_majority_scores_rejected_marks(db):
+    creator, contest = _multi_contest(db, required=3, marks_setting_rejected=-2)
+    j2, j3 = make_user(db, "J2"), make_user(db, "J3")
+    s = submit(contest, make_user(db, "Sub"))
+    review_submission(s, creator.id, "accept", score=8)
+    review_submission(s, j2.id, "reject")
+    review_submission(s, j3.id, "reject")
+    assert s.status == "rejected" and s.score == -2
+    assert s.parameter_scores is None
+
+
+def test_parameter_scores_are_averaged_over_agreeing_reviews(db):
+    creator, contest = _multi_contest(db)
+    j2 = make_user(db, "J2")
+    s = submit(contest, make_user(db, "Sub"))
+    review_submission(s, creator.id, "accept", score=7,
+                      parameter_scores={"Quality": 4, "Sources": 3})
+    review_submission(s, j2.id, "accept", score=5,
+                      parameter_scores={"Quality": 3, "Sources": 2})
+    assert s.parameter_scores == {"Quality": 3.5, "Sources": 2.5}
+    assert s.score == 6
+
+
+def test_extra_reviewer_blocked_once_final(db):
+    creator, contest = _multi_contest(db)
+    j2, j3 = make_user(db, "J2"), make_user(db, "J3")
+    s = submit(contest, make_user(db, "Sub"))
+    review_submission(s, creator.id, "accept", score=8)
+    review_submission(s, j2.id, "accept", score=6)
+    with pytest.raises(ValueError, match="already has its 2 required reviews"):
+        review_submission(s, j3.id, "reject")
+
+
+def test_reviewer_edits_own_entry_not_a_second_one(db):
+    creator, contest = _multi_contest(db)
+    j2 = make_user(db, "J2")
+    s = submit(contest, make_user(db, "Sub"))
+    review_submission(s, creator.id, "accept", score=8)
+    review_submission(s, creator.id, "accept", score=4)      # edit
+    assert s.to_dict()["review_count"] == 1
+    assert s.status == SubmissionStatus.PENDING.value       # still needs J2
+
+    review_submission(s, j2.id, "accept", score=4)
+    assert s.status == "accepted" and s.score == 4
+    review_submission(s, creator.id, "reject")                # edit after final → tie
+    assert s.status == SubmissionStatus.PENDING.value
+
+
+def test_stats_update_clears_all_reviews(db):
+    creator, contest = _multi_contest(db)
+    alice = make_user(db, "Alice")
+    first = submit(contest, alice)
+    review_submission(first, creator.id, "accept", score=8)
+    ev = evaluate_article(contest, ARTICLE, submitter="Alice", submitter_id=alice.id)
+    updated = create_submission(alice.id, contest, ev["hash"], update_existing=True)
+    assert updated.reviews is None and updated.to_dict()["review_count"] == 0
+
+
+def test_parameter_average_ignores_reviews_without_breakdown(db):
+    creator, contest = _multi_contest(db)
+    j2 = make_user(db, "J2")
+    s = submit(contest, make_user(db, "Sub"))
+    review_submission(s, creator.id, "accept", score=6, parameter_scores={"Quality": 6})
+    review_submission(s, j2.id, "accept", score=4)              # simple review, no breakdown
+    assert s.parameter_scores == {"Quality": 6}
+    assert s.score == 5
+
+
+def test_leaderboard_with_multiple_reviews(db):
+    from services.contest import get_leaderboard
+    creator, contest = _multi_contest(db)
+    j2 = make_user(db, "J2")
+    alice = make_user(db, "Alice")
+    partial = submit(contest, alice, "https://en.wikipedia.org/wiki/A")
+    done = submit(contest, alice, "https://en.wikipedia.org/wiki/B")
+    review_submission(partial, creator.id, "accept", score=8)    # 1 of 2 → still pending
+    review_submission(done, creator.id, "accept", score=8)
+    review_submission(done, j2.id, "accept", score=5)            # final: avg 6.5 → 7
+
+    [row] = get_leaderboard(contest)
+    assert row["username"] == "Alice"
+    assert row["total_submissions"] == 2
+    assert row["reviewed_count"] == 1        # only the final one
+    assert row["pending_count"] == 1
+    assert row["total_marks"] == 7           # pending contributes 0

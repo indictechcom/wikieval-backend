@@ -475,3 +475,22 @@ def test_add_on_behalf_blocks_article_submitted_by_another_participant(client, d
 
     assert resp.status_code == 400
     assert "another participant" in resp.get_json()["error"]
+
+
+def test_second_jury_member_can_review_when_two_required(client, db, login_as):
+    creator, contest = active_contest(db, reviews_required=2, jury_members=["J1", "J2"])
+    # jury User rows are created by create_contest (ensure_users)
+    s = _submit(contest, make_user(db, "Alice"))
+
+    login_as(client, "J1")
+    r1 = client.post(f"/api/submissions/{s.id}/review", json={"decision": "accept", "score": 8})
+    assert r1.status_code == 200
+    assert r1.get_json()["status"] == "pending" and r1.get_json()["review_count"] == 1
+
+    login_as(client, "J2")
+    r2 = client.post(f"/api/submissions/{s.id}/review", json={"decision": "accept", "score": 6})
+    body = r2.get_json()
+    assert r2.status_code == 200
+    assert body["status"] == "accepted" and body["score"] == 7
+    assert [r["reviewer_username"] for r in body["reviews"]] == ["J1", "J2"]
+    assert body["reviews_required"] == 2
