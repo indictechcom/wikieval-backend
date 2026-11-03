@@ -89,16 +89,21 @@ def sync_logged_in_user():
         session.pop('uid', None)
         return
 
-    # Fast path: a cached id that still resolves to a real user. Re-resolve if
-    # the row is gone (e.g. the user was deleted or the DB was reset), so a
-    # stale uid can't leave a valid session stuck at 401.
-    uid = session.get('uid')
-    if uid and db.session.get(User, uid) is not None:
-        return
-
     username = MW_OAUTH.get_current_user(True)
     if not username:
         return
+
+    # Fast path: a cached id that still resolves to the OAuth user. Re-resolve
+    # if the row is gone (e.g. the user was deleted or the DB was reset) or
+    # belongs to someone else (the user re-ran the OAuth login as a different
+    # Wikimedia account without logging out here first, which replaces the
+    # token but not the cached uid), so a stale uid can never bind a session to
+    # the wrong row.
+    uid = session.get('uid')
+    if uid:
+        cached = db.session.get(User, uid)
+        if cached is not None and cached.username == username:
+            return
 
     try:
         user = get_or_create_user(username)

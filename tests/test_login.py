@@ -94,3 +94,27 @@ def test_logout_clears_cached_uid(client, login_as):
     client.get("/api/user")
     with client.session_transaction() as sess:
         assert "uid" not in sess
+
+
+def test_switching_account_without_logout_rebinds_uid(client, login_as):
+    # Log in as one account, then re-run the OAuth login as another account
+    # without logging out of the tool first. MWOAuth replaces the token but
+    # leaves the cached uid, so the hook must notice the username mismatch and
+    # bind the session to the new account's row, not keep acting as the old one.
+    login_as(client, "Nitesh (OKI)")
+    client.get("/api/user")
+    with client.session_transaction() as sess:
+        old_uid = sess["uid"]
+
+    login_as(client, USERNAME)
+    with client.session_transaction() as sess:
+        sess["uid"] = old_uid   # the fixture drops it; restore the real state
+    body = client.get("/api/user").get_json()
+
+    assert body["username"] == USERNAME
+    assert body["is_superadmin"] is True
+    with client.session_transaction() as sess:
+        assert sess["uid"] != old_uid
+        assert sess["uid"] == User.query.filter_by(username=USERNAME).one().id
+    # The superadmin-gated endpoint resolves current_user() from the uid.
+    assert client.get("/api/contest-creation-requests").status_code == 200
