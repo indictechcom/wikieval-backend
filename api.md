@@ -550,9 +550,11 @@ reviewed again from scratch. The removal is written to the review audit log.
 | `401` | not logged in | `{ "error": "Login required" }` |
 | `404` | no such contest | `{ "error": "Contest not found" }` |
 
-An article can be submitted to a contest **once, by one participant only**
-(unique on contest + article link). The `hash` is a signed token (via the app
-`SECRET_KEY`); tampering with it or its metadata is rejected.
+An article can be submitted to a contest **once, by one participant only**.
+This is enforced by the application on every new submission (not by a DB
+constraint, so contests that already contained duplicates before this rule
+are unaffected). The `hash` is a signed token (via the app `SECRET_KEY`);
+tampering with it or its metadata is rejected.
 
 ## GET `/api/contests/<id>/submissions`
 

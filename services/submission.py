@@ -217,10 +217,10 @@ def create_submission(user_id, contest, token, update_existing=False):
     try:
         db.session.commit()
     except IntegrityError:
-        # Another participant submitted the same article between our check and
-        # the commit — the (contest, article) unique constraint fired.
+        # The (user, contest, article) unique constraint fired after our
+        # duplicate pre-check (a concurrent submit by the same user).
         db.session.rollback()
-        raise ValueError(TAKEN_BY_OTHER)
+        raise ValueError("This article has already been submitted to this contest")
     return submission
 
 
@@ -264,7 +264,7 @@ def import_submission(contest, username, article_link):
     try:
         db.session.commit()
     except IntegrityError:
-        # Concurrent import of the same article — the (contest, article) unique
+        # Concurrent import of the same (submitter, article) — the unique
         # constraint fired after our duplicate pre-check. Treat as a duplicate.
         db.session.rollback()
         raise ValueError("This article has already been submitted to this contest")

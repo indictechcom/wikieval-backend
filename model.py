@@ -279,8 +279,8 @@ class Submission(db.Model):
                         nullable=False, index=True)
     contest_id = db.Column(db.Integer, db.ForeignKey('contests.id', ondelete='CASCADE'),
                            nullable=False, index=True)
-    # 766 keeps the (contest_id, article_link) unique index within MySQL's
-    # 3072-byte key limit under utf8mb4 (766*4 + 1 int).
+    # 766 keeps the (user_id, contest_id, article_link) unique index within
+    # MySQL's 3072-byte key limit under utf8mb4 (766*4 + 2 ints).
     # Percent-encoded international titles are long; decode links on write to
     # keep the stored value short.
     article_link = db.Column(db.String(766), nullable=False)
@@ -319,13 +319,14 @@ class Submission(db.Model):
         nullable=False,
     )
 
-    # One article per contest, by one participant only: a given article can be
-    # submitted to a contest exactly once, regardless of who submits it. The
-    # submitter may re-evaluate it to refresh the stats (which resets the review)
-    # but never creates a second row.
+    # One article per contest, by one participant only, is enforced by the
+    # application (services/submission.py) for every new submission, so past
+    # contests that already contain cross-user duplicates are left untouched.
+    # The DB constraint only guards the per-user case (a submitter may
+    # re-evaluate their article to refresh its stats, never add a second row).
     __table_args__ = (
-        db.UniqueConstraint('contest_id', 'article_link',
-                            name='uq_submission_contest_article'),
+        db.UniqueConstraint('user_id', 'contest_id', 'article_link',
+                            name='uq_submission_user_contest_article'),
         db.CheckConstraint(
             "status IN (" + ", ".join(f"'{s.value}'" for s in SubmissionStatus) + ")",
             name='ck_submissions_status',
