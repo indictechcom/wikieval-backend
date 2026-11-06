@@ -25,6 +25,9 @@ Backend HTTP API for WikiEval.
 | POST | `/api/contests` | user + `can_create_contest` | Create a contest |
 | PUT | `/api/contests/<id>` | organizer | Edit (all fields while pending; organizers/jury only once active) |
 | POST | `/api/contests/<id>/start` | organizer | Start a contest (locks it) |
+| GET | `/api/contests/<id>/child-requests` | user | Child-campaign requests for a group (all for its organizers; own otherwise) |
+| POST | `/api/contests/<id>/child-requests` | user | Request a child campaign under a group |
+| POST | `/api/contests/<id>/child-requests/<rid>/review` | group organizer | Approve / reject a child-campaign request |
 | POST | `/api/contests/<id>/submissions/evaluate` | user | Evaluate an article → info + hash |
 | POST | `/api/contests/<id>/submissions` | user | Submit using the hash |
 | GET | `/api/contests/<id>/submissions` | user | List submissions (own; all for creator/jury/superadmin) |
@@ -417,6 +420,110 @@ Start a contest: transitions `pending` → `active` and locks editing.
 | `403` | not an organizer | `{ "error": "Only a contest organizer can start it" }` |
 | `404` | no such contest | `{ "error": "Contest not found" }` |
 | `409` | already started | `{ "error": "Contest has already been started" }` |
+
+---
+
+## Child-campaign requests
+
+A local organizer asks, from a group campaign's page, for a child campaign
+under it. The requester supplies only the child's **name**, its **local
+organizers** (at least one) and optionally its **jury**; the project, dates,
+timezone, eligibility rules and scoring are copied from the group on approval
+(and the group's jury is used when the request names none). The group's
+organizers (or a superadmin) review the request — the global contest-creation
+right is not involved in asking, and no `/admin` queue is: each group has its
+own list. There is no withdraw/cancel action on a pending request.
+
+**Request object**
+
+```json
+{
+  "id": 1,
+  "parent_id": 7,
+  "parent_name": "Wikipedia Asian Month",
+  "user_id": 12,
+  "username": "LocalOrg",
+  "name": "Asian Month India",
+  "organizers": ["LocalOrg", "Helper"],
+  "jury_members": ["JurorA"],
+  "status": "pending",
+  "reviewed_by": null,
+  "reviewer_username": null,
+  "reviewed_at": null,
+  "rejection_reason": null,
+  "contest_id": null,
+  "contest_name": null,
+  "created_at": "2026-11-06T10:00:00+00:00"
+}
+```
+
+`contest_id` / `contest_name` are set once the request is approved (the child
+campaign that was created).
+
+### GET `/api/contests/<id>/child-requests`
+
+| Status | When | Body |
+|--------|------|------|
+| `200` | ok | `{ "requests": [ <request object>, ... ], "can_review": bool }` |
+| `400` | not a group campaign | `{ "error": "Not a group campaign" }` |
+| `401` | not logged in | `{ "error": "Login required" }` |
+| `404` | no such contest | `{ "error": "Contest not found" }` |
+
+Newest first. An organizer of the group (or a superadmin) gets every request
+with `can_review: true`; any other logged-in user gets only their own requests
+(so they can see whether each is pending, approved or rejected).
+
+### POST `/api/contests/<id>/child-requests`
+
+```json
+{ "name": "Asian Month India", "organizers": ["LocalOrg"], "jury_members": ["JurorA"] }
+```
+
+| Status | When | Body |
+|--------|------|------|
+| `201` | created | the request object (`status: "pending"`) |
+| `400` | not a group; missing name; no organizer; name clashes with an existing child or another pending request (case-insensitive) | `{ "error": "<message>" }` |
+| `401` | not logged in | `{ "error": "Login required" }` |
+| `404` | no such contest | `{ "error": "Contest not found" }` |
+
+Any logged-in user may ask; a rejected request may be re-submitted.
+
+### POST `/api/contests/<id>/child-requests/<rid>/review`
+
+```json
+{ "decision": "approve", "organizers": ["LocalOrg", "Lead"], "jury_members": ["JurorB"] }
+```
+
+or
+
+```json
+{ "decision": "reject", "rejection_reason": "Please coordinate with the Nepal team first" }
+```
+
+`organizers` / `jury_members` are optional on approve: the reviewer may edit
+either list before the child is created (an empty organizer list is refused).
+
+| Status | When | Body |
+|--------|------|------|
+| `200` | reviewed | the updated request object |
+| `400` | bad `decision`, missing `rejection_reason`, empty organizers, or already reviewed | `{ "error": "<message>" }` |
+| `401` | not logged in | `{ "error": "Login required" }` |
+| `403` | not an organizer of the group (a child's own organizer or the requester doesn't count) | `{ "error": "<message>" }` |
+| `404` | no such contest / request, or the request belongs to another group | `{ "error": "<message>" }` |
+
+Approving:
+
+- creates the child campaign (`parent_id` = the group) named as requested,
+  with the group's `project_name`, `start_date`, `end_date`, `timezone`,
+  `eligibility_rules`, `marks_setting_*`, `scoring_parameters` and
+  `reviews_required`, the request's `organizers` and `jury_members` (group jury
+  if none). The requester is the child's creator, so always one of its
+  organizers. The child starts as a draft (`pending`) so its local organizers
+  can adjust it (dates, rules, …) and then `/start` it; it is listed under
+  `/children` to the group's and its own organizers right away, and publicly
+  once started;
+- sets the requester's `can_create_contest` to `true`;
+- writes a `hierarchy … action=create-child` line to the audit log.
 
 ---
 

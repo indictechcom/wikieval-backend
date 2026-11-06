@@ -11,6 +11,7 @@ from flask_mwoauth import MWOAuth
 from sqlalchemy.exc import SQLAlchemyError
 
 from model import User, db
+from routes.child_campaign_request import bp as child_campaign_request_bp
 from routes.contest import bp as contest_bp
 from routes.contest_creation_request import bp as contest_creation_request_bp
 from routes.submission import bp as submission_bp
@@ -71,6 +72,7 @@ MW_OAUTH = MWOAuth(
 )
 app.register_blueprint(MW_OAUTH.bp)
 app.register_blueprint(contest_creation_request_bp)
+app.register_blueprint(child_campaign_request_bp)
 app.register_blueprint(contest_bp)
 app.register_blueprint(submission_bp)
 

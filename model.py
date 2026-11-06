@@ -116,6 +116,79 @@ class ContestCreationRequest(db.Model):
         return f"<ContestCreationRequest user_id={self.user_id} status={self.status}>"
 
 
+class ChildCampaignRequest(db.Model):
+    """A request, made on a group campaign's page, to create a child campaign
+    under it. The requester supplies only the child's name, its local
+    organizers and (optionally) its jury; everything else (project, dates,
+    eligibility rules, scoring) is copied from the group on approval. Reviewed
+    by the group's organizers, not by superadmins."""
+    __tablename__ = 'child_campaign_requests'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    parent_id = db.Column(db.Integer, db.ForeignKey('contests.id', ondelete='CASCADE'),
+                          nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'),
+                        nullable=False, index=True)
+    name = db.Column(db.String(200), nullable=False)
+    organizers = db.Column(db.JSON, nullable=True)
+    jury_members = db.Column(db.JSON, nullable=True)
+    status = db.Column(db.String(20), nullable=False,
+                       default=RequestStatus.PENDING.value, index=True)
+
+    reviewed_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'),
+                            nullable=True)
+    reviewed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    rejection_reason = db.Column(db.Text, nullable=True)
+    # The child campaign created on approval.
+    contest_id = db.Column(db.Integer, db.ForeignKey('contests.id', ondelete='SET NULL'),
+                           nullable=True)
+
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "status IN (" + ", ".join(f"'{s.value}'" for s in RequestStatus) + ")",
+            name='ck_child_campaign_requests_status',
+        ),
+    )
+
+    parent = db.relationship('Contest', foreign_keys=[parent_id],
+                             backref=db.backref('child_requests', cascade='all, delete-orphan'))
+    contest = db.relationship('Contest', foreign_keys=[contest_id])
+    requester = db.relationship('User', foreign_keys=[user_id],
+                                backref='child_campaign_requests')
+    reviewer = db.relationship('User', foreign_keys=[reviewed_by])
+
+    def to_dict(self):
+        """Serialize this child-campaign request for API responses."""
+        return {
+            "id": self.id,
+            "parent_id": self.parent_id,
+            "parent_name": self.parent.name if self.parent else None,
+            "user_id": self.user_id,
+            "username": self.requester.username if self.requester else None,
+            "name": self.name,
+            "organizers": list(self.organizers or []),
+            "jury_members": list(self.jury_members or []),
+            "status": self.status,
+            "reviewed_by": self.reviewed_by,
+            "reviewer_username": self.reviewer.username if self.reviewer else None,
+            "reviewed_at": _iso_utc(self.reviewed_at),
+            "rejection_reason": self.rejection_reason,
+            "contest_id": self.contest_id,
+            "contest_name": self.contest.name if self.contest else None,
+            "created_at": _iso_utc(self.created_at),
+        }
+
+    def __repr__(self):
+        """String representation of ChildCampaignRequest instance"""
+        return f"<ChildCampaignRequest parent_id={self.parent_id} name={self.name!r} status={self.status}>"
+
+
 class Contest(db.Model):
     __tablename__ = 'contests'
 
