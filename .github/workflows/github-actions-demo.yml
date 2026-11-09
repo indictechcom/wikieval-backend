@@ -14,7 +14,7 @@ jobs:
         steps:
         - name: github-project-issue-to-sheets
           id: github-project-issue-to-sheets
-          uses: ViRGiL175/github-project-issue-to-sheets@dev
+          uses: ViRGiL175/github-project-issue-to-sheets@master
           with:
             google-api-service-account-credentials: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_DATA }}
             document-id: '12NT4vmbu5fYIt9ltQWvBd-bm3hjNJR4cZlHMqxjPrsM'
