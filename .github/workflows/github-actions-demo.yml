@@ -18,4 +18,4 @@ jobs:
           with:
             google-api-service-account-credentials: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_DATA }}
             document-id: '12NT4vmbu5fYIt9ltQWvBd-bm3hjNJR4cZlHMqxjPrsM'
-            sheet-name: 'IMPORT: backend'
+            sheet-name: '[import-backend]'
