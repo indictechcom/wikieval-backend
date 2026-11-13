@@ -128,8 +128,11 @@ def _check_min_words(value, metadata, ctx):
 def _check_min_refs(value, metadata, ctx):
     if not value:
         return
-    if metadata.get("ref_new_count") is None:
-        raise ValueError("Could not determine the article's reference count; please try again")
+    # Reference counts come from XTools, which is optional: when it is down the
+    # counts are None. Don't block the submission over a third-party outage —
+    # the UI flags the counts as unavailable and the jury can verify manually.
+    if metadata.get("ref_new_count") is None and metadata.get("ref_reused_count") is None:
+        return
     total = (metadata.get("ref_new_count") or 0) + (metadata.get("ref_reused_count") or 0)
     if total < value:
         raise ValueError(f"Article must have at least {value} references")

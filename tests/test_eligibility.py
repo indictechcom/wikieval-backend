@@ -59,11 +59,15 @@ def test_min_words_and_hard_fail_when_unavailable():
         check_eligibility(_Contest({"min_word_count": 100}), _meta(word_count=None))
 
 
-def test_min_refs_total_and_hard_fail():
+def test_min_refs_total_and_skip_when_unavailable():
     with pytest.raises(ValueError, match="at least 10 references"):
         check_eligibility(_Contest({"min_reference_count": 10}), _meta())
-    with pytest.raises(ValueError, match="[Cc]ould not determine.*reference"):
+    # Only one count missing: the other still counts toward the total.
+    with pytest.raises(ValueError, match="at least 5 references"):
         check_eligibility(_Contest({"min_reference_count": 5}), _meta(ref_new_count=None))
+    # Both missing (XTools unavailable): the rule is skipped, not failed.
+    check_eligibility(_Contest({"min_reference_count": 5}),
+                      _meta(ref_new_count=None, ref_reused_count=None))
 
 
 # --- author_only (boolean, needs the submitter) ---------------------------- #

@@ -191,14 +191,27 @@ def test_evaluate_hard_fails_when_word_count_unavailable(db, monkeypatch):
         evaluate_article(contest, ARTICLE)
 
 
-def test_evaluate_hard_fails_when_reference_count_unavailable(db, monkeypatch):
+def test_evaluate_skips_reference_rule_when_count_unavailable(db, monkeypatch):
+    # XTools (the source of reference counts) is optional: when it is down the
+    # counts are None and the min_reference_count rule must NOT block submission.
     _creator, contest = active_contest(db, eligibility_rules={"min_reference_count": 5})
     monkeypatch.setattr(
         "services.mediawiki.process_article",
         lambda link, contest=None: {"namespace": 0, "ref_new_count": None, "ref_reused_count": None},
     )
 
-    with pytest.raises(ValueError, match="[Cc]ould not determine.*reference count"):
+    result = evaluate_article(contest, ARTICLE)
+    assert result["article_metadata"]["ref_new_count"] is None
+
+
+def test_evaluate_enforces_reference_rule_when_count_known(db, monkeypatch):
+    _creator, contest = active_contest(db, eligibility_rules={"min_reference_count": 5})
+    monkeypatch.setattr(
+        "services.mediawiki.process_article",
+        lambda link, contest=None: {"namespace": 0, "ref_new_count": 2, "ref_reused_count": 1},
+    )
+
+    with pytest.raises(ValueError, match="at least 5 references"):
         evaluate_article(contest, ARTICLE)
 
 

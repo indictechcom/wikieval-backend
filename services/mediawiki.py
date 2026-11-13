@@ -13,8 +13,8 @@ import requests
 
 from services import editor_prose_counter
 
-MEDIAWIKI_API_TIMEOUT = 10
-XTOOLS_API_TIMEOUT = 30
+MEDIAWIKI_API_TIMEOUT = 15
+XTOOLS_API_TIMEOUT = 15
 USER_AGENT = "WikiEval/1.0 (https://wikieval.toolforge.org) Python/requests"
 
 XTOOLS_API = "https://xtools.wmcloud.org/api/page"
